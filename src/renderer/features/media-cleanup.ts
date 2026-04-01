@@ -27,6 +27,8 @@ export interface MediaRefs {
   cancelEditorDrawLoop?: (() => void) | null;
   stopAudioMeter?: (() => void) | null;
   clearAudioBufferCache?: (() => void) | null;
+  windowStreams?: MediaStream[];
+  windowRecIntervals?: ReturnType<typeof setInterval>[];
 }
 
 /**
@@ -145,6 +147,12 @@ function cleanupAllMedia(refs: MediaRefs | null): void {
     }
   }
 
+  // --- Window capture intervals -----------------------------------------------
+  if (refs.windowRecIntervals && refs.windowRecIntervals.length) {
+    refs.windowRecIntervals.forEach((interval) => clearInterval(interval));
+    refs.windowRecIntervals = [];
+  }
+
   // --- Media streams (last -- stops ScreenCaptureKit sessions) ---------------
   stopStream(refs.screenStream);
   refs.screenStream = null;
@@ -154,6 +162,12 @@ function cleanupAllMedia(refs: MediaRefs | null): void {
 
   stopStream(refs.audioStream);
   refs.audioStream = null;
+
+  // --- Window capture streams ------------------------------------------------
+  if (refs.windowStreams && refs.windowStreams.length) {
+    refs.windowStreams.forEach((stream) => stopStream(stream));
+    refs.windowStreams = [];
+  }
 }
 
 export { cleanupAllMedia, stopStream };

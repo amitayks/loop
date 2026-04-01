@@ -24,11 +24,12 @@ export interface RenderSectionInput {
 }
 
 export interface RenderOptions {
-  takes?: Array<{ id: string; screenPath?: string | null; cameraPath?: string | null; mousePath?: string | null }>;
+  takes?: Array<{ id: string; screenPath?: string | null; cameraPath?: string | null; mousePath?: string | null; windowPaths?: Array<{ name: string; path: string; width?: number; height?: number }> | null }>;
   sections?: unknown[];
   keyframes?: Keyframe[];
   overlays?: Overlay[];
   audioOverlays?: AudioOverlay[];
+  wallpaperPath?: string | null;
   pipSize?: number;
   screenFitMode?: ScreenFitMode;
   exportAudioPreset?: ExportAudioPreset;
@@ -208,9 +209,12 @@ export interface PickFolderOptions {
 // ── Thumbnail capture ────────────────────────────────────────────────
 
 export interface ThumbnailCaptureOptions {
-  takes: Array<{ id: string; screenPath?: string | null; cameraPath?: string | null; mousePath?: string | null }>;
+  takes: Array<{ id: string; screenPath?: string | null; cameraPath?: string | null; mousePath?: string | null; windowPaths?: Array<{ name: string; path: string; width?: number; height?: number }> | null }>;
   keyframes: Keyframe[];
   overlays: Overlay[];
+  wallpaperPath?: string | null;
+  canvasDataUrl?: string;
+  timelineTime?: number;
   sourceTime: number;
   cameraSyncOffsetMs: number;
   sourceWidth: number;

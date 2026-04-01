@@ -42,7 +42,7 @@ import type {
   SavedKeyframeState,
   Take,
   Project,
-  ProjectTimeline
+  ProjectTimeline,
 } from '../shared/types/domain.js';
 import type { RecoveryTake, RecentProjectsResult } from '../shared/types/services.js';
 
@@ -188,6 +188,7 @@ interface AppendTakeOpts {
   takeId: string;
   screenPath: string;
   cameraPath: string | null;
+  windowPaths: Array<{ name: string; path: string; width?: number; height?: number; proxyPath?: string | null }> | null;
   recordedDuration: number;
   trimSections: Section[];
   projectSession: { id: number; projectPath: string };
@@ -226,6 +227,11 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     const cameraSyncOffsetInput = document.getElementById('cameraSyncOffsetMs') as HTMLInputElement;
 
     const screenSelect = document.getElementById('screenSource') as HTMLSelectElement;
+    const screenPickerBtn = document.getElementById('screenPickerBtn')!;
+    const screenPickerPanel = document.getElementById('screenPickerPanel')!;
+    const screenPickerSingleZone = document.getElementById('screenPickerSingleZone')!;
+    const screenPickerWindowZone = document.getElementById('screenPickerWindowZone')!;
+    const screenPickerDeviceZone = document.getElementById('screenPickerDeviceZone')!;
     const screenFitSelect = document.getElementById('screenFit') as HTMLSelectElement;
     const cameraSelect = document.getElementById('cameraSource') as HTMLSelectElement;
     const audioSelect = document.getElementById('audioSource') as HTMLSelectElement;
@@ -291,6 +297,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     const editorSectionMarkers = document.getElementById('editorSectionMarkers')!;
     const editorOverlayTrack0 = document.getElementById('editorOverlayTrack0')!;
     const editorOverlayTrack1 = document.getElementById('editorOverlayTrack1')!;
+    const editorOverlayTrack2 = document.getElementById('editorOverlayTrack2')!;
+    const editorOverlayTrack3 = document.getElementById('editorOverlayTrack3')!;
+    const overlayTrackEls = [editorOverlayTrack0, editorOverlayTrack1, editorOverlayTrack2, editorOverlayTrack3];
     const editorScrubber = document.getElementById('editorScrubber')!;
     const editorSectionTranscriptList = document.getElementById('editorSectionTranscriptList')!;
     let editorRenderTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -330,6 +339,14 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     let audioSendInterval: ReturnType<typeof setInterval> | null = null;
     let micSourceNode: MediaStreamAudioSourceNode | null = null;
 
+    // Window capture state
+    let windowStreams: MediaStream[] = [];
+    let windowVideos: HTMLVideoElement[] = [];
+    let windowRecIntervals: ReturnType<typeof setInterval>[] = [];
+    let windowSourceNames: string[] = [];
+    let backgroundImage: HTMLImageElement | null = null;
+    let backgroundImagePath: string | null = null;
+
     function handleRenderProgress(update: { percent?: number | null; status?: string }) {
       if (!editorState || !editorState.rendering) return;
 
@@ -367,27 +384,67 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           }
         } else if (payload.status === 'done' && payload.proxyPath) {
           proxyStatus.set(payload.takeId, { status: 'done' });
-          const take = activeProject?.takes?.find((t: Take) => t.id === payload.takeId);
-          if (take) {
-            take.proxyPath = payload.proxyPath;
-            persistProjectNow().catch((err: unknown) => console.warn('[Proxy] Failed to persist proxyPath:', err));
-          }
-          // Hot-swap the cached video element to use the proxy
-          const cached = takeVideoPool.get(payload.takeId);
-          if (cached) {
-            const wasPlaying = !cached.screen.paused;
-            const currentTime = cached.screen.currentTime;
-            const rate = cached.screen.playbackRate;
-            cached.screen.src = pathToFileUrl(payload.proxyPath!);
-            cached.screen.addEventListener('loadedmetadata', () => {
-              cached.screen.currentTime = currentTime;
-              if (wasPlaying) {
-                cached.screen.playbackRate = rate;
-                cached.screen.play().catch(() => {});
-                // Restart draw loop since requestVideoFrameCallback on the old src is dead
-                if (!hasPendingEditorDraw()) scheduleEditorDrawLoop();
+
+          // Check if this is a window proxy (takeId format: "take-xxx-win0")
+          const winProxyMatch = (payload.takeId as string).match(/^(.+)-win(\d+)$/);
+          if (winProxyMatch) {
+            const realTakeId = winProxyMatch[1]!;
+            const winIdx = parseInt(winProxyMatch[2]!, 10);
+            const take = activeProject?.takes?.find((t: Take) => t.id === realTakeId);
+            if (take && Array.isArray(take.windowPaths) && take.windowPaths[winIdx]) {
+              take.windowPaths[winIdx]!.proxyPath = payload.proxyPath;
+              // Also update any window overlay that uses this media path
+              if (editorState) {
+                const wp = take.windowPaths[winIdx]!;
+                for (const ov of editorState.overlays) {
+                  if (ov.mediaType === 'window' && ov.mediaPath === wp.path) {
+                    ov.proxyPath = payload.proxyPath;
+                  }
+                }
               }
-            }, { once: true });
+              persistProjectNow().catch((err: unknown) => console.warn('[Proxy] Failed to persist window proxyPath:', err));
+            }
+            // Also hot-swap the take screen video if it was using win0
+            if (winIdx === 0) {
+              const cached = takeVideoPool.get(realTakeId);
+              if (cached) {
+                const wasPlaying = !cached.screen.paused;
+                const currentTime = cached.screen.currentTime;
+                const rate = cached.screen.playbackRate;
+                cached.screen.src = pathToFileUrl(payload.proxyPath!);
+                cached.screen.addEventListener('loadedmetadata', () => {
+                  cached.screen.currentTime = currentTime;
+                  if (wasPlaying) {
+                    cached.screen.playbackRate = rate;
+                    cached.screen.play().catch(() => {});
+                    if (!hasPendingEditorDraw()) scheduleEditorDrawLoop();
+                  }
+                }, { once: true });
+              }
+            }
+          } else {
+            // Standard screen proxy
+            const take = activeProject?.takes?.find((t: Take) => t.id === payload.takeId);
+            if (take) {
+              take.proxyPath = payload.proxyPath;
+              persistProjectNow().catch((err: unknown) => console.warn('[Proxy] Failed to persist proxyPath:', err));
+            }
+            // Hot-swap the cached video element to use the proxy
+            const cached = takeVideoPool.get(payload.takeId);
+            if (cached) {
+              const wasPlaying = !cached.screen.paused;
+              const currentTime = cached.screen.currentTime;
+              const rate = cached.screen.playbackRate;
+              cached.screen.src = pathToFileUrl(payload.proxyPath!);
+              cached.screen.addEventListener('loadedmetadata', () => {
+                cached.screen.currentTime = currentTime;
+                if (wasPlaying) {
+                  cached.screen.playbackRate = rate;
+                  cached.screen.play().catch(() => {});
+                  if (!hasPendingEditorDraw()) scheduleEditorDrawLoop();
+                }
+              }, { once: true });
+            }
           }
           renderSectionMarkers();
         } else if (payload.status === 'error') {
@@ -416,6 +473,59 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       return `audio-overlay-${Date.now()}-${audioOverlayIdCounter}`;
     }
     const AUDIO_OVERLAY_EXTENSIONS = ['.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a'];
+
+    function createOverlaysFromWindowPaths(
+      windowPaths: Array<{ name: string; path: string; width?: number; height?: number; proxyPath?: string | null }>,
+      duration: number
+    ): Overlay[] {
+      return windowPaths.slice(0, 2).map((wp, idx) => {
+        const srcW = wp.width || CANVAS_W;
+        const srcH = wp.height || CANVAS_H;
+
+        // Landscape positioning — matches recording preview (drawComposite)
+        let lw: number, lh: number, lx: number, ly: number;
+        if (windowPaths.length === 1) {
+          // Single window: fit to full canvas (same as drawFitRounded(0,0,CANVAS_W,CANVAS_H))
+          const scale = Math.min(CANVAS_W / srcW, CANVAS_H / srcH);
+          lw = srcW * scale;
+          lh = srcH * scale;
+          lx = (CANVAS_W - lw) / 2;
+          ly = (CANVAS_H - lh) / 2;
+        } else {
+          // Two windows: side by side with gap (same as drawComposite's 2-window layout)
+          const gap = 16;
+          const halfW = (CANVAS_W - gap) / 2;
+          const scale = Math.min(halfW / srcW, CANVAS_H / srcH);
+          lw = srcW * scale;
+          lh = srcH * scale;
+          lx = idx === 0
+            ? (halfW - lw) / 2
+            : halfW + gap + (halfW - lw) / 2;
+          ly = (CANVAS_H - lh) / 2;
+        }
+
+        // Reel starts identical to landscape — user can adjust per mode later
+        const landscapePos = { x: Math.round(lx), y: Math.round(ly), width: Math.round(lw), height: Math.round(lh) };
+
+        return {
+          id: generateOverlayId(),
+          trackIndex: idx,
+          mediaPath: wp.path,
+          mediaType: 'window' as const,
+          startTime: 0,
+          endTime: duration,
+          sourceStart: 0,
+          sourceEnd: duration,
+          landscape: landscapePos,
+          reel: { ...landscapePos },
+          saved: false,
+          sourceName: wp.name,
+          sourceWidth: srcW,
+          sourceHeight: srcH,
+          ...(wp.proxyPath ? { proxyPath: wp.proxyPath } : {})
+        };
+      });
+    }
 
     const MIN_SECTION_ZOOM = 1;
     const MIN_REEL_SECTION_ZOOM = 0.5;
@@ -727,8 +837,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     const proxyStatus = new Map<string, ProxyEntry>(); // takeId -> status entry
     const overlayImageCache = new Map<string, HTMLImageElement>(); // mediaPath -> HTMLImageElement
     const mouseTrailCache = new Map<string, MouseTrailData>(); // takeId -> trail data
-    const overlayVideoEls: (HTMLVideoElement | null)[] = [null, null]; // per-track reusable <video> elements
-    const overlayVideoCurrentPaths: (string | null)[] = [null, null];
+    const overlayVideoEls: (HTMLVideoElement | null)[] = [null, null, null, null]; // per-track reusable <video> elements
+    const overlayVideoCurrentPaths: (string | null)[] = [null, null, null, null];
     let activeTakeId: string | null = null;
     let activePlaybackSection: Section | null = null;
     let cameraResyncCooldownUntil = 0;
@@ -748,7 +858,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const screen = document.createElement('video');
       screen.playsInline = true;
       screen.preload = 'auto';
-      screen.src = pathToFileUrl(take.proxyPath || take.screenPath);
+      // In window capture mode (no screenPath), use first window file as timing source
+      const screenSrc = take.proxyPath || take.screenPath
+        || (Array.isArray(take.windowPaths) && take.windowPaths.length > 0 ? take.windowPaths[0]!.path : null);
+      if (screenSrc) {
+        screen.src = pathToFileUrl(screenSrc);
+      }
       let camera: HTMLVideoElement | null = null;
       if (take.cameraPath) {
         camera = document.createElement('video');
@@ -856,7 +971,10 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         overlayVideoEls[trackIdx]!.preload = 'auto';
       }
       if (overlayVideoCurrentPaths[trackIdx] !== mediaPath && activeProjectPath) {
-        overlayVideoEls[trackIdx]!.src = pathToFileUrl(`${activeProjectPath}/${mediaPath}`);
+        // Absolute paths (window captures) should not be prefixed with project path
+        const isAbsolute = mediaPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(mediaPath);
+        const fullPath = isAbsolute ? mediaPath : `${activeProjectPath}/${mediaPath}`;
+        overlayVideoEls[trackIdx]!.src = pathToFileUrl(fullPath);
         overlayVideoCurrentPaths[trackIdx] = mediaPath;
       }
       return overlayVideoEls[trackIdx];
@@ -999,7 +1117,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
             recording, screenStream, cameraStream, audioStream,
             recorders, screenRecInterval, audioSendInterval, timerInterval,
             audioContext, scribeWorkletNode, scribeWs,
-            drawRAF, meterRAF, cancelEditorDrawLoop, stopAudioMeter
+            drawRAF, meterRAF, cancelEditorDrawLoop, stopAudioMeter,
+            windowStreams, windowRecIntervals
           });
           screenStream = null;
           cameraStream = null;
@@ -1012,6 +1131,10 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           scribeWs = null;
           drawRAF = null;
           meterRAF = null;
+          windowStreams = [];
+          windowVideos = [];
+          windowRecIntervals = [];
+          windowSourceNames = [];
           mediaInitialized = false;
         }, MEDIA_IDLE_TIMEOUT_MS);
       }
@@ -1040,7 +1163,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           overlays: [],
           savedOverlays: [],
           audioOverlays: [],
-          savedAudioOverlays: []
+          savedAudioOverlays: [],
+          backgroundImagePath: null
         };
       }
 
@@ -1065,7 +1189,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         overlays: Array.isArray(editorState.overlays) ? editorState.overlays.map(o => ({ ...o, landscape: { ...o.landscape }, reel: { ...o.reel } })) : [],
         savedOverlays: Array.isArray(editorState.savedOverlays) ? editorState.savedOverlays.map(o => ({ ...o, landscape: { ...o.landscape }, reel: { ...o.reel } })) : [],
         audioOverlays: Array.isArray(editorState.audioOverlays) ? editorState.audioOverlays.map(ao => ({ ...ao })) : [],
-        savedAudioOverlays: Array.isArray(editorState.savedAudioOverlays) ? editorState.savedAudioOverlays.map(ao => ({ ...ao })) : []
+        savedAudioOverlays: Array.isArray(editorState.savedAudioOverlays) ? editorState.savedAudioOverlays.map(ao => ({ ...ao })) : [],
+        backgroundImagePath: backgroundImagePath
       };
     }
 
@@ -1202,6 +1327,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const take = activeProject.takes?.find((t: Take) => t.id === takeId);
       if (!take) return;
       const filePaths = [take.screenPath, take.cameraPath, take.mousePath, take.proxyPath].filter(Boolean) as string[];
+      if (Array.isArray(take.windowPaths)) {
+        for (const wp of take.windowPaths) {
+          if (wp.path) filePaths.push(wp.path);
+          if (wp.proxyPath) filePaths.push(wp.proxyPath);
+        }
+      }
       if (filePaths.length > 0) {
         await window.electronAPI.stageTakeFiles(activeProjectPath, filePaths);
       }
@@ -1211,7 +1342,14 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       if (!takeId || !activeProjectPath || !activeProject) return;
       const take = activeProject.takes?.find((t: Take) => t.id === takeId);
       if (!take) return;
-      const fileNames = ([take.screenPath, take.cameraPath, take.mousePath, take.proxyPath] as (string | null)[])
+      const allPaths = [take.screenPath, take.cameraPath, take.mousePath, take.proxyPath] as (string | null)[];
+      if (Array.isArray(take.windowPaths)) {
+        for (const wp of take.windowPaths) {
+          if (wp.path) allPaths.push(wp.path);
+          if (wp.proxyPath) allPaths.push(wp.proxyPath);
+        }
+      }
+      const fileNames = allPaths
         .filter(Boolean)
         .map((p) => {
           const parts = (p as string).split(/[/\\]/);
@@ -1522,6 +1660,11 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         setWorkspaceView('recording');
       }
 
+      // Load background image if set in project
+      if (project.timeline?.backgroundImagePath) {
+        loadBackgroundFromPath(project.timeline.backgroundImagePath).catch(() => {});
+      }
+
       await window.electronAPI.projectSetLast(projectPath);
       updateWorkspaceHeader();
 
@@ -1530,6 +1673,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         let needsMarkerUpdate = false;
         for (const take of project.takes) {
           if (!take.proxyPath && take.screenPath) {
+            // Standard screen proxy
             proxyStatus.set(take.id, { status: 'pending', percent: 0 });
             needsMarkerUpdate = true;
             window.electronAPI.generateProxy({
@@ -1538,6 +1682,23 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
               projectFolder: projectPath,
               durationSec: take.duration || 0
             }).catch((err: unknown) => console.warn('[Proxy] Failed to start proxy generation:', err));
+          }
+          // Window file proxies
+          if (Array.isArray(take.windowPaths)) {
+            for (let wi = 0; wi < take.windowPaths.length; wi++) {
+              const wp = take.windowPaths[wi]!;
+              if (wp.path && !wp.proxyPath) {
+                const proxyKey = `${take.id}-win${wi}`;
+                proxyStatus.set(proxyKey, { status: 'pending', percent: 0 });
+                needsMarkerUpdate = true;
+                window.electronAPI.generateProxy({
+                  takeId: proxyKey,
+                  screenPath: wp.path,
+                  projectFolder: projectPath,
+                  durationSec: take.duration || 0
+                }).catch((err: unknown) => console.warn(`[Proxy] Failed for window ${wi}:`, err));
+              }
+            }
           }
         }
         if (needsMarkerUpdate) renderSectionMarkers();
@@ -1548,7 +1709,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       if (mediaInitialized) return;
       mediaInitialized = true;
       await enumerateDevices();
-      try { await updateScreenStream(); } catch (error) { console.warn('Screen source init failed:', error); }
+      // Acquire streams based on picker state
+      if (pickerMode === 'windows' && pickerCheckedWindows.length > 0) {
+        try { await updateWindowStreams(pickerCheckedWindows); } catch (error) { console.warn('Window stream init failed:', error); }
+      } else {
+        try { await updateScreenStream(); } catch (error) { console.warn('Screen source init failed:', error); }
+      }
       try { await updateCameraStream(); } catch (error) { console.warn('Camera source init failed:', error); }
       try { await updateAudioStream(); } catch (error) { console.warn('Audio source init failed:', error); }
       if (activeWorkspaceView === 'recording') updatePreview();
@@ -2450,9 +2616,27 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     }
 
     function renderOverlayMarkers(): void {
-      if (!editorOverlayTrack0 || !editorOverlayTrack1) return;
-      editorOverlayTrack0.innerHTML = '';
-      editorOverlayTrack1.innerHTML = '';
+      const TRACK_COLORS = ['#3B82F6', '#22C55E', '#6366F1', '#6366F1'];
+
+      // Clear all 4 tracks
+      for (const tel of overlayTrackEls) {
+        if (tel) tel.innerHTML = '';
+      }
+
+      // Determine which tracks have overlays for visibility toggling
+      const tracksWithOverlays = new Set<number>();
+      if (editorState && Array.isArray(editorState.overlays)) {
+        for (const o of editorState.overlays) {
+          tracksWithOverlays.add(o.trackIndex || 0);
+        }
+      }
+      for (let t = 0; t < 4; t++) {
+        const el = overlayTrackEls[t];
+        if (el) {
+          el.classList.toggle('hidden', !tracksWithOverlays.has(t));
+        }
+      }
+
       if (!editorState || !editorState.duration || !Array.isArray(editorState.overlays) || editorState.overlays.length === 0) {
         updateOverlaySizeControl();
         if (activeSidebarTab === 'overlays') renderOverlayList();
@@ -2460,6 +2644,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       }
 
       for (const overlay of editorState.overlays) {
+        const trackIdx = overlay.trackIndex || 0;
+        const trackColor = TRACK_COLORS[Math.min(trackIdx, 3)] || '#6366F1';
         const pctLeft = (overlay.startTime / editorState.duration) * 100;
         const pctWidth = Math.max(0.35, ((overlay.endTime - overlay.startTime) / editorState.duration) * 100);
         const selected = overlay.id === editorState.selectedOverlayId;
@@ -2469,42 +2655,62 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         band.dataset.overlayId = overlay.id;
         band.style.left = pctLeft + '%';
         band.style.width = pctWidth + '%';
-        band.style.backgroundColor = selected ? 'rgba(99,102,241,0.45)' : 'rgba(99,102,241,0.22)';
+        band.style.backgroundColor = selected ? hexToRgba(trackColor, 0.45) : hexToRgba(trackColor, 0.22);
         band.style.borderRadius = '3px';
         band.style.cursor = 'pointer';
         if (selected) {
-          band.style.boxShadow = 'inset 0 0 0 2px rgba(129,140,248,0.6)';
+          band.style.boxShadow = `inset 0 0 0 2px ${hexToRgba(trackColor, 0.6)}`;
         }
 
-        const fileName = overlay.mediaPath.split('/').pop() || '';
-        const icon = overlay.mediaType === 'video' ? '\u25B6' : '\u25A3';
-        band.title = `${icon} ${fileName}: ${formatTime(overlay.startTime)} - ${formatTime(overlay.endTime)}`;
+        // Label: for window overlays, show sourceName; otherwise filename + icon
+        let displayLabel: string;
+        let displayTitle: string;
+        if (overlay.mediaType === 'window') {
+          const wName = overlay.sourceName || 'Window';
+          const icon = '\u25A1'; // window icon
+          displayLabel = `${icon} ${wName}`;
+          displayTitle = `${icon} ${wName}: ${formatTime(overlay.startTime)} - ${formatTime(overlay.endTime)}`;
+        } else {
+          const fileName = overlay.mediaPath.split('/').pop() || '';
+          const icon = overlay.mediaType === 'video' ? '\u25B6' : '\u25A3';
+          displayLabel = `${icon} ${fileName}`;
+          displayTitle = `${icon} ${fileName}: ${formatTime(overlay.startTime)} - ${formatTime(overlay.endTime)}`;
+        }
+        band.title = displayTitle;
 
         const label = document.createElement('div');
         label.className = 'absolute text-[9px] font-medium pointer-events-none truncate';
         label.style.cssText = 'left:4px;right:4px;top:50%;transform:translateY(-50%);';
-        label.style.color = selected ? 'rgba(199,210,254,0.95)' : 'rgba(165,180,252,0.75)';
-        label.textContent = `${icon} ${fileName}`;
+        label.style.color = selected ? hexToRgba(trackColor, 0.95) : hexToRgba(trackColor, 0.75);
+        label.textContent = displayLabel;
         band.appendChild(label);
 
         if (selected) {
           const leftHandle = document.createElement('div');
           leftHandle.dataset.overlayTrimEdge = 'left';
           leftHandle.dataset.overlayId = overlay.id;
-          leftHandle.style.cssText = 'position:absolute;top:0;bottom:0;left:0;width:6px;cursor:col-resize;z-index:30;border-left:3px solid rgba(165,180,252,0.7);';
+          leftHandle.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:6px;cursor:col-resize;z-index:30;border-left:3px solid ${hexToRgba(trackColor, 0.7)};`;
           band.appendChild(leftHandle);
           const rightHandle = document.createElement('div');
           rightHandle.dataset.overlayTrimEdge = 'right';
           rightHandle.dataset.overlayId = overlay.id;
-          rightHandle.style.cssText = 'position:absolute;top:0;bottom:0;right:0;width:6px;cursor:col-resize;z-index:30;border-right:3px solid rgba(165,180,252,0.7);';
+          rightHandle.style.cssText = `position:absolute;top:0;bottom:0;right:0;width:6px;cursor:col-resize;z-index:30;border-right:3px solid ${hexToRgba(trackColor, 0.7)};`;
           band.appendChild(rightHandle);
         }
 
-        const trackEl = (overlay.trackIndex === 1) ? editorOverlayTrack1 : editorOverlayTrack0;
+        const trackEl = overlayTrackEls[Math.min(trackIdx, 3)] || overlayTrackEls[0]!;
         trackEl.appendChild(band);
       }
       updateOverlaySizeControl();
       if (activeSidebarTab === 'overlays') renderOverlayList();
+    }
+
+    /** Convert hex color (#RRGGBB) to rgba string */
+    function hexToRgba(hex: string, alpha: number): string {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
     }
 
     // === Overlay trim, split, delete ===
@@ -2548,18 +2754,19 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const prevEnd = idxInTrack > 0 ? sameTrack[idxInTrack - 1]!.endTime : 0;
       const nextStart = idxInTrack < sameTrack.length - 1 ? sameTrack[idxInTrack + 1]!.startTime : editorState.duration;
 
+      const isVideoLikeTrim = overlay.mediaType === 'video' || overlay.mediaType === 'window';
       if (overlayTrimDragState.edge === 'left') {
         const newStart = Math.max(prevEnd, Math.min(overlay.endTime - 0.1, overlayTrimDragState.originalStartTime + deltaSec));
         const shift = newStart - overlayTrimDragState.originalStartTime;
         overlay.startTime = newStart;
-        if (overlay.mediaType === 'video') {
+        if (isVideoLikeTrim) {
           overlay.sourceStart = Math.max(0, overlayTrimDragState.originalSourceStart + shift);
         }
       } else {
         const newEnd = Math.min(nextStart, Math.max(overlay.startTime + 0.1, overlayTrimDragState.originalEndTime + deltaSec));
         const shift = newEnd - overlayTrimDragState.originalEndTime;
         overlay.endTime = newEnd;
-        if (overlay.mediaType === 'video') {
+        if (isVideoLikeTrim) {
           overlay.sourceEnd = Math.max(overlay.sourceStart + 0.1, overlayTrimDragState.originalSourceEnd + shift);
         }
       }
@@ -2575,6 +2782,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       pushUndo();
 
       const splitSourceTime = overlay.sourceStart + (time - overlay.startTime);
+      const isVideoLike = overlay.mediaType === 'video' || overlay.mediaType === 'window';
       const newOverlay: Overlay = {
         id: generateOverlayId(),
         trackIndex: overlay.trackIndex || 0,
@@ -2582,14 +2790,19 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         mediaType: overlay.mediaType,
         startTime: time,
         endTime: overlay.endTime,
-        sourceStart: overlay.mediaType === 'video' ? splitSourceTime : 0,
+        sourceStart: isVideoLike ? splitSourceTime : 0,
         sourceEnd: overlay.sourceEnd,
         landscape: { ...overlay.landscape },
         reel: { ...overlay.reel },
-        saved: false
+        saved: false,
+        // Preserve window-specific fields
+        ...(overlay.sourceName ? { sourceName: overlay.sourceName } : {}),
+        ...(overlay.sourceWidth ? { sourceWidth: overlay.sourceWidth } : {}),
+        ...(overlay.sourceHeight ? { sourceHeight: overlay.sourceHeight } : {}),
+        ...(overlay.proxyPath ? { proxyPath: overlay.proxyPath } : {})
       };
       overlay.endTime = time;
-      if (overlay.mediaType === 'video') {
+      if (isVideoLike) {
         overlay.sourceEnd = splitSourceTime;
       }
       const idx = editorState.overlays.indexOf(overlay);
@@ -2607,7 +2820,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const removed = editorState.overlays.splice(idx, 1)[0]!;
       if (removed.saved) {
         editorState.savedOverlays.push(removed);
-      } else {
+      } else if (removed.mediaType !== 'window') {
+        // Window media files are managed by take cleanup, not stageOverlayFile
         const stillReferenced = editorState.overlays.some(o => o.mediaPath === removed.mediaPath)
           || editorState.savedOverlays.some(o => o.mediaPath === removed.mediaPath);
         if (!stillReferenced && activeProjectPath) {
@@ -3157,51 +3371,206 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       targetCtx.restore();
     }
 
-    // Populate device lists
-    async function enumerateDevices(): Promise<void> {
+    // ── Source picker state ───────────────────────────────────────────
+    type PickerMode = 'none' | 'entire-screen' | 'windows' | 'device';
+    let pickerMode: PickerMode = 'none';
+    let pickerEntireScreenId = '';
+    let pickerDeviceId = '';
+    let pickerCheckedWindows: Array<{ id: string; name: string }> = [];
+    let pickerAllSources: Array<{ id: string; name: string }> = [];
+    let pickerAllVideoInputs: MediaDeviceInfo[] = [];
+
+    function updatePickerButtonText(): void {
+      if (pickerMode === 'none') {
+        screenPickerBtn.textContent = 'None';
+      } else if (pickerMode === 'entire-screen') {
+        screenPickerBtn.textContent = 'Entire Screen';
+      } else if (pickerMode === 'device') {
+        const dev = pickerAllVideoInputs.find(d => d.deviceId === pickerDeviceId);
+        screenPickerBtn.textContent = dev?.label || 'Camera';
+      } else if (pickerCheckedWindows.length === 1) {
+        screenPickerBtn.textContent = pickerCheckedWindows[0]!.name;
+      } else if (pickerCheckedWindows.length === 2) {
+        screenPickerBtn.textContent = '2 Windows';
+      } else {
+        screenPickerBtn.textContent = 'None';
+      }
+    }
+
+    function renderPickerPanel(): void {
+      // Single-select zone: None + Entire Screen
+      screenPickerSingleZone.innerHTML = '';
+      const noneRow = createPickerRadioRow('None', pickerMode === 'none', () => {
+        pickerMode = 'none';
+        pickerCheckedWindows = [];
+        pickerDeviceId = '';
+        applyPickerSelection();
+      });
+      screenPickerSingleZone.appendChild(noneRow);
+
+      const screenSource = pickerAllSources.find(s => s.id.startsWith('screen:'));
+      if (screenSource) {
+        pickerEntireScreenId = screenSource.id;
+        const entireRow = createPickerRadioRow('Entire Screen', pickerMode === 'entire-screen', () => {
+          pickerMode = 'entire-screen';
+          pickerCheckedWindows = [];
+          pickerDeviceId = '';
+          applyPickerSelection();
+        });
+        screenPickerSingleZone.appendChild(entireRow);
+      }
+
+      // Window checkboxes zone
+      screenPickerWindowZone.innerHTML = '';
+      const windowSources = pickerAllSources.filter(s => s.id.startsWith('window:'));
+      if (windowSources.length === 0) {
+        screenPickerWindowZone.classList.add('hidden');
+      } else {
+        screenPickerWindowZone.classList.remove('hidden');
+        for (const ws of windowSources) {
+          const checked = pickerCheckedWindows.some(w => w.id === ws.id);
+          const disabled = !checked && pickerCheckedWindows.length >= 2;
+          const row = createPickerCheckboxRow(ws.name, checked, disabled, (isChecked) => {
+            if (isChecked) {
+              if (pickerCheckedWindows.length < 2) {
+                pickerCheckedWindows.push({ id: ws.id, name: ws.name });
+                pickerMode = 'windows';
+                pickerDeviceId = '';
+              }
+            } else {
+              pickerCheckedWindows = pickerCheckedWindows.filter(w => w.id !== ws.id);
+              if (pickerCheckedWindows.length === 0) pickerMode = 'none';
+            }
+            applyPickerSelection();
+          });
+          screenPickerWindowZone.appendChild(row);
+        }
+      }
+
+      // Capture devices zone
+      screenPickerDeviceZone.innerHTML = '';
+      if (pickerAllVideoInputs.length === 0) {
+        screenPickerDeviceZone.classList.add('hidden');
+      } else {
+        screenPickerDeviceZone.classList.remove('hidden');
+        const label = document.createElement('div');
+        label.className = 'px-3 py-1 text-xs text-neutral-500 uppercase tracking-wider';
+        label.textContent = 'Capture Devices';
+        screenPickerDeviceZone.appendChild(label);
+        for (const dev of pickerAllVideoInputs) {
+          const active = pickerMode === 'device' && pickerDeviceId === dev.deviceId;
+          const row = createPickerRadioRow(dev.label || 'Camera', active, () => {
+            pickerMode = 'device';
+            pickerDeviceId = dev.deviceId;
+            pickerCheckedWindows = [];
+            applyPickerSelection();
+          });
+          screenPickerDeviceZone.appendChild(row);
+        }
+      }
+    }
+
+    function createPickerRadioRow(label: string, active: boolean, onClick: () => void): HTMLElement {
+      const div = document.createElement('div');
+      div.className = `flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-neutral-800 ${active ? 'text-white' : 'text-neutral-400'}`;
+      div.innerHTML = `<span class="w-3 h-3 rounded-full border ${active ? 'border-blue-500 bg-blue-500' : 'border-neutral-600'} flex-shrink-0"></span><span class="truncate">${label}</span>`;
+      div.addEventListener('click', onClick);
+      return div;
+    }
+
+    function createPickerCheckboxRow(label: string, checked: boolean, disabled: boolean, onChange: (checked: boolean) => void): HTMLElement {
+      const div = document.createElement('div');
+      div.className = `flex items-center gap-2 px-3 py-1.5 ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-neutral-800'} ${checked ? 'text-white' : 'text-neutral-400'}`;
+      div.innerHTML = `<span class="w-3 h-3 rounded-sm border ${checked ? 'border-blue-500 bg-blue-500' : 'border-neutral-600'} flex-shrink-0 flex items-center justify-center text-xs">${checked ? '✓' : ''}</span><span class="truncate">${label}</span>`;
+      if (!disabled) {
+        div.addEventListener('click', () => onChange(!checked));
+      }
+      return div;
+    }
+
+    async function applyPickerSelection(): Promise<void> {
+      renderPickerPanel();
+      updatePickerButtonText();
+
+      // Handle streams
+      if (pickerMode === 'windows' && pickerCheckedWindows.length > 0) {
+        // Stop screen stream, start window streams
+        if (screenStream) {
+          screenStream.getTracks().forEach(t => t.stop());
+          screenStream = null;
+          screenVideo.srcObject = null;
+        }
+        await updateWindowStreams(pickerCheckedWindows);
+        // Auto-prompt for wallpaper if none set
+        if (!backgroundImage) {
+          pickAndLoadBackground();
+        }
+      } else {
+        // Stop window streams, use screen/device stream
+        cleanupWindowStreams();
+        try { await updateScreenStream(); } catch (err) { console.warn('Screen stream update failed:', err); }
+      }
+      updatePreview();
+    }
+
+    // Toggle picker panel
+    screenPickerBtn.addEventListener('click', () => {
+      if (recording) return;
+      const isOpen = !screenPickerPanel.classList.contains('hidden');
+      if (isOpen) {
+        screenPickerPanel.classList.add('hidden');
+      } else {
+        populatePickerSources().then(() => {
+          renderPickerPanel();
+          screenPickerPanel.classList.remove('hidden');
+        });
+      }
+    });
+
+    // Close picker on outside click
+    document.addEventListener('click', (e) => {
+      if (!screenPickerPanel.classList.contains('hidden') &&
+          !screenPickerPanel.contains(e.target as Node) &&
+          e.target !== screenPickerBtn) {
+        screenPickerPanel.classList.add('hidden');
+      }
+    });
+
+    async function populatePickerSources(): Promise<void> {
       try {
         const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
         tempStream.getTracks().forEach(t => t.stop());
-      } catch (_e) {
-        // Intentionally ignore - we only need to stop tracks to refresh device list
-      }
+      } catch (_e) { /* ignore */ }
 
       const devices = await navigator.mediaDevices.enumerateDevices();
-      const sources = await window.electronAPI.getSources();
+      pickerAllSources = await window.electronAPI.getSources();
+      pickerAllVideoInputs = devices.filter(d => d.kind === 'videoinput');
 
-      screenSelect.innerHTML = '<option value="">None</option>';
+      // Remove closed windows from checked list
+      pickerCheckedWindows = pickerCheckedWindows.filter(w =>
+        pickerAllSources.some(s => s.id === w.id)
+      );
+      if (pickerMode === 'windows' && pickerCheckedWindows.length === 0) {
+        pickerMode = 'none';
+      }
+    }
+
+    // Populate device lists (now also populates picker)
+    async function enumerateDevices(): Promise<void> {
+      await populatePickerSources();
+
+      // Still populate camera and audio selects the old way
       cameraSelect.innerHTML = '<option value="">None</option>';
       audioSelect.innerHTML = '<option value="">None</option>';
 
-      sources.forEach(s => {
-        const opt = document.createElement('option');
-        opt.value = s.id;
-        opt.textContent = s.name;
-        screenSelect.appendChild(opt);
-      });
-
-      const videoInputs = devices.filter(d => d.kind === 'videoinput');
-
-      if (videoInputs.length > 0) {
-        const sep = document.createElement('option');
-        sep.disabled = true;
-        sep.textContent = '\u2500\u2500 Capture Devices \u2500\u2500';
-        screenSelect.appendChild(sep);
-        videoInputs.forEach((d, i) => {
-          const opt = document.createElement('option');
-          opt.value = 'device:' + d.deviceId;
-          opt.textContent = d.label || `Camera ${i + 1}`;
-          screenSelect.appendChild(opt);
-        });
-      }
-
-      videoInputs.forEach((d, i) => {
+      pickerAllVideoInputs.forEach((d, i) => {
         const opt = document.createElement('option');
         opt.value = d.deviceId;
         opt.textContent = d.label || `Camera ${i + 1}`;
         cameraSelect.appendChild(opt);
       });
 
+      const devices = await navigator.mediaDevices.enumerateDevices();
       devices.filter(d => d.kind === 'audioinput').forEach((d, i) => {
         const opt = document.createElement('option');
         opt.value = d.deviceId;
@@ -3209,11 +3578,28 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         audioSelect.appendChild(opt);
       });
 
-      const screenIdx = sources.findIndex(s => s.id.startsWith('screen:'));
-      if (screenIdx !== -1) screenSelect.selectedIndex = screenIdx + 1;
-      else if (screenSelect.options.length > 1) screenSelect.selectedIndex = 1;
+      // Default selection: Entire Screen
+      const screenSource = pickerAllSources.find(s => s.id.startsWith('screen:'));
+      if (screenSource && pickerMode === 'none' && pickerCheckedWindows.length === 0) {
+        pickerMode = 'entire-screen';
+        pickerEntireScreenId = screenSource.id;
+      }
       if (cameraSelect.options.length > 1) cameraSelect.selectedIndex = 1;
       if (audioSelect.options.length > 1) audioSelect.selectedIndex = 1;
+
+      updatePickerButtonText();
+      // Acquire stream for default selection
+      try { await updateScreenStream(); } catch (_e) { console.warn('Default screen stream failed:', _e); }
+      updatePreview();
+    }
+
+    // Refresh on device change
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.ondevicechange !== 'undefined') {
+      navigator.mediaDevices.addEventListener('devicechange', () => {
+        if (!screenPickerPanel.classList.contains('hidden')) {
+          populatePickerSources().then(() => renderPickerPanel());
+        }
+      });
     }
 
     async function updateScreenStream(): Promise<void> {
@@ -3223,7 +3609,10 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         screenVideo.srcObject = null;
       }
 
-      const sourceId = screenSelect.value;
+      // Derive sourceId from picker state (screenSelect is a dead hidden element)
+      let sourceId = '';
+      if (pickerMode === 'entire-screen') sourceId = pickerEntireScreenId;
+      else if (pickerMode === 'device') sourceId = 'device:' + pickerDeviceId;
       if (!sourceId) return;
 
       if (sourceId.startsWith('device:')) {
@@ -3295,8 +3684,102 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       startAudioMeter(audioStream);
     }
 
+    async function updateWindowStreams(sourceIds: Array<{ id: string; name: string }>): Promise<void> {
+      cleanupWindowStreams();
+      windowSourceNames = [];
+      for (const source of sourceIds) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Chromium desktop capture mandatory constraints
+          const desktopConstraints: any = {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: source.id,
+              maxFrameRate: 30
+            }
+          };
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: desktopConstraints
+          });
+          const video = document.createElement('video');
+          video.autoplay = true;
+          video.muted = true;
+          video.playsInline = true;
+          video.srcObject = stream;
+          windowStreams.push(stream);
+          windowVideos.push(video);
+          windowSourceNames.push(source.name);
+
+          // Handle window closed during recording
+          const track = stream.getVideoTracks()[0];
+          if (track) {
+            const idx = windowStreams.length - 1;
+            track.addEventListener('ended', () => {
+              console.warn(`Window capture track ended: ${source.name}`);
+              if (windowStreams[idx]) {
+                windowStreams[idx]!.getTracks().forEach(t => t.stop());
+              }
+            });
+          }
+        } catch (err) {
+          console.warn(`Failed to capture window "${source.name}":`, err);
+        }
+      }
+    }
+
+    function cleanupWindowStreams(): void {
+      for (const stream of windowStreams) {
+        stream.getTracks().forEach(t => t.stop());
+      }
+      for (const video of windowVideos) {
+        video.srcObject = null;
+      }
+      windowStreams = [];
+      windowVideos = [];
+      windowSourceNames = [];
+    }
+
+    async function pickAndLoadBackground(): Promise<void> {
+      const filePath = await window.electronAPI.pickBackgroundImage();
+      if (!filePath) return;
+      await loadBackgroundFromPath(filePath);
+      scheduleProjectSave();
+    }
+
+    async function loadBackgroundFromPath(filePath: string): Promise<void> {
+      try {
+        const fileUrl = window.electronAPI.pathToFileUrl(filePath);
+        const img = new Image();
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('Failed to load background image'));
+          img.src = fileUrl;
+        });
+        backgroundImage = img;
+        backgroundImagePath = filePath;
+      } catch (_err) {
+        backgroundImage = null;
+        backgroundImagePath = null;
+      }
+    }
+
+    function drawBackground(targetCtx: CanvasRenderingContext2D, w: number, h: number): void {
+      if (backgroundImage) {
+        // Cover: fill entire canvas without stretching, crop overflow
+        const scale = Math.max(w / backgroundImage.naturalWidth, h / backgroundImage.naturalHeight);
+        const dw = backgroundImage.naturalWidth * scale;
+        const dh = backgroundImage.naturalHeight * scale;
+        const dx = (w - dw) / 2;
+        const dy = (h - dh) / 2;
+        targetCtx.drawImage(backgroundImage, dx, dy, dw, dh);
+      } else {
+        targetCtx.fillStyle = '#1E1E1E';
+        targetCtx.fillRect(0, 0, w, h);
+      }
+    }
+
     function updatePreview(): void {
-      const hasAny = screenStream || cameraStream;
+      const hasAny = screenStream || cameraStream || windowStreams.length > 0;
       noPreview.classList.toggle('hidden', !!hasAny);
       recordBtn.disabled = !hasAny || !saveFolder;
 
@@ -3305,6 +3788,41 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     }
 
     function drawComposite(): void {
+      // Window capture mode: wallpaper + windows + camera PIP
+      if (windowStreams.length > 0) {
+        drawBackground(ctx, CANVAS_W, CANVAS_H);
+
+        if (windowStreams.length === 1 && windowVideos[0]) {
+          const vid = windowVideos[0]!;
+          if (vid.videoWidth && vid.videoHeight) {
+            drawFitRounded(ctx, vid, 0, 0, CANVAS_W, CANVAS_H);
+          }
+        } else if (windowStreams.length >= 2) {
+          const halfW = (CANVAS_W - 16) / 2;
+          for (let i = 0; i < 2; i++) {
+            const vid = windowVideos[i];
+            if (vid && vid.videoWidth && vid.videoHeight) {
+              const x = i === 0 ? 0 : halfW + 16;
+              drawFitRounded(ctx, vid, x, 0, halfW, CANVAS_H);
+            }
+          }
+        }
+
+        // Camera PIP on top
+        const hasCamera = cameraStream && cameraVideo.videoWidth;
+        if (hasCamera) {
+          const pipW = PIP_SIZE;
+          const pipH = pipW;
+          const pipX = CANVAS_W - pipW - PIP_MARGIN;
+          const pipY = CANVAS_H - pipH - PIP_MARGIN;
+          drawPip(ctx, cameraVideo, pipX, pipY, pipW, pipH);
+        }
+
+        drawRAF = requestAnimationFrame(drawComposite);
+        return;
+      }
+
+      // Original single-source mode
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
@@ -3339,6 +3857,25 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const dx = x + (w - dw) / 2;
       const dy = y + (h - dh) / 2;
       targetCtx.drawImage(video, dx, dy, dw, dh);
+    }
+
+    function drawFitRounded(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return;
+      const scale = Math.min(w / vw, h / vh);
+      const dw = vw * scale;
+      const dh = vh * scale;
+      const dx = x + (w - dw) / 2;
+      const dy = y + (h - dh) / 2;
+      const radius = Math.max(0, Math.round(18 * scale));
+      if (dw <= 0 || dh <= 0) return;
+      targetCtx.save();
+      targetCtx.beginPath();
+      targetCtx.roundRect(dx, dy, dw, dh, radius);
+      targetCtx.clip();
+      targetCtx.drawImage(video, dx, dy, dw, dh);
+      targetCtx.restore();
     }
 
     function drawFill(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
@@ -3465,7 +4002,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       if (suffix === 'camera') {
         options.videoBitsPerSecond = 10000000;
         options.audioBitsPerSecond = 192000;
-      } else if (suffix === 'screen') {
+      } else if (suffix.startsWith('win')) {
+        // Window captures: maximum bitrate for pixel-perfect text/UI
+        options.videoBitsPerSecond = 60000000;
+        options.audioBitsPerSecond = 192000;
+      } else {
+        // Screen recording
         options.videoBitsPerSecond = 30000000;
         options.audioBitsPerSecond = 192000;
       }
@@ -3539,6 +4081,31 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         recorders.push(createRecorder(screenOnly, 'screen'));
       }
 
+      // Window capture recording
+      windowRecIntervals = [];
+      for (let i = 0; i < windowStreams.length && i < 2; i++) {
+        const wStream = windowStreams[i]!;
+        const wVideo = windowVideos[i]!;
+        const srcTrack = wStream.getVideoTracks()[0];
+        if (!srcTrack) continue;
+        const settings = srcTrack.getSettings();
+        const wCanvas = document.createElement('canvas');
+        wCanvas.width = settings.width || 1920;
+        wCanvas.height = settings.height || 1080;
+        if (i === 0) {
+          mouseTrailCaptureWidth = wCanvas.width;
+          mouseTrailCaptureHeight = wCanvas.height;
+        }
+        const wCtx = wCanvas.getContext('2d', { alpha: false })!;
+        wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
+        const interval = setInterval(() => {
+          wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
+        }, 1000 / 30);
+        windowRecIntervals.push(interval);
+        const winOnly = addAudioToStream(wCanvas.captureStream(30));
+        recorders.push(createRecorder(winOnly, `win${i}`));
+      }
+
       if (cameraStream) {
         const cameraOnly = addAudioToStream(new MediaStream(cameraStream.getVideoTracks()));
         recorders.push(createRecorder(cameraOnly, 'camera'));
@@ -3552,6 +4119,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       recordBtn.classList.replace('hover:bg-red-700', 'hover:bg-neutral-700');
       recordBtn.classList.add('border', 'border-neutral-600');
       screenSelect.disabled = true;
+      screenPickerBtn.classList.add('opacity-50', 'pointer-events-none');
       cameraSelect.disabled = true;
       audioSelect.disabled = true;
 
@@ -3731,6 +4299,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           takeId,
           screenPath,
           cameraPath,
+          windowPaths: null,
           recordedDuration: recoveryTake.recordedDuration,
           trimSections: recoverySections,
           projectSession
@@ -3940,7 +4509,152 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       scheduleProjectSave();
     }
 
-    function appendTakeToTimeline({ takeId, screenPath: _screenPath, cameraPath, recordedDuration, trimSections, projectSession }: AppendTakeOpts): AppendTakeResult | null {
+    function splitAllAtPlayhead(): void {
+      if (!editorState || editorState.rendering) return;
+      const time = editorState.currentTime;
+
+      // Split the section at playhead
+      splitSectionAtPlayhead();
+
+      // Split every visual overlay that spans the playhead
+      for (let i = editorState.overlays.length - 1; i >= 0; i--) {
+        const o = editorState.overlays[i]!;
+        if (time <= o.startTime + 0.1 || time >= o.endTime - 0.1) continue;
+        const splitSourceTime = o.sourceStart + (time - o.startTime);
+        const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
+        const newOverlay: Overlay = {
+          id: generateOverlayId(),
+          trackIndex: o.trackIndex || 0,
+          mediaPath: o.mediaPath,
+          mediaType: o.mediaType,
+          startTime: time,
+          endTime: o.endTime,
+          sourceStart: isVideoLike ? splitSourceTime : 0,
+          sourceEnd: o.sourceEnd,
+          landscape: { ...o.landscape },
+          reel: { ...o.reel },
+          saved: false,
+          ...(o.sourceName ? { sourceName: o.sourceName } : {}),
+          ...(o.sourceWidth ? { sourceWidth: o.sourceWidth } : {}),
+          ...(o.sourceHeight ? { sourceHeight: o.sourceHeight } : {}),
+          ...(o.proxyPath ? { proxyPath: o.proxyPath } : {})
+        };
+        o.endTime = time;
+        if (isVideoLike) { o.sourceEnd = splitSourceTime; }
+        editorState.overlays.splice(i + 1, 0, newOverlay);
+      }
+
+      // Split every audio overlay that spans the playhead
+      for (let i = editorState.audioOverlays.length - 1; i >= 0; i--) {
+        const ao = editorState.audioOverlays[i]!;
+        if (time <= ao.startTime + 0.1 || time >= ao.endTime - 0.1) continue;
+        const splitSourceTime = ao.sourceStart + (time - ao.startTime);
+        const newAo: AudioOverlay = {
+          id: generateAudioOverlayId(),
+          trackIndex: ao.trackIndex || 0,
+          mediaPath: ao.mediaPath,
+          startTime: time,
+          endTime: ao.endTime,
+          sourceStart: splitSourceTime,
+          sourceEnd: ao.sourceEnd,
+          volume: ao.volume,
+          saved: false
+        };
+        ao.endTime = time;
+        ao.sourceEnd = splitSourceTime;
+        editorState.audioOverlays.splice(i + 1, 0, newAo);
+      }
+
+      renderOverlayMarkers();
+      renderAudioOverlayMarkers();
+      scheduleProjectSave();
+    }
+
+    async function deleteAllAtPlayhead(): Promise<void> {
+      if (!editorState || editorState.rendering) return;
+
+      // Delete the selected section (or section at playhead)
+      const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
+      if (!section) return;
+      const sectionStart = section.start;
+      const sectionEnd = section.end;
+
+      pushUndo();
+
+      // Delete overlays fully within the section's time range
+      for (let i = editorState.overlays.length - 1; i >= 0; i--) {
+        const o = editorState.overlays[i]!;
+        if (o.startTime >= sectionStart - 0.01 && o.endTime <= sectionEnd + 0.01) {
+          const removed = editorState.overlays.splice(i, 1)[0]!;
+          if (removed.saved) {
+            editorState.savedOverlays.push(removed);
+          } else if (removed.mediaType !== 'window') {
+            const stillReferenced = editorState.overlays.some(r => r.mediaPath === removed.mediaPath)
+              || editorState.savedOverlays.some(r => r.mediaPath === removed.mediaPath);
+            if (!stillReferenced && activeProjectPath) {
+              window.electronAPI.stageOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
+            }
+          }
+        }
+      }
+
+      // Delete audio overlays fully within the section's time range
+      for (let i = editorState.audioOverlays.length - 1; i >= 0; i--) {
+        const ao = editorState.audioOverlays[i]!;
+        if (ao.startTime >= sectionStart - 0.01 && ao.endTime <= sectionEnd + 0.01) {
+          const removed = editorState.audioOverlays.splice(i, 1)[0]!;
+          if (removed.saved) {
+            editorState.savedAudioOverlays.push(removed);
+          } else {
+            const stillReferenced = editorState.audioOverlays.some(r => r.mediaPath === removed.mediaPath)
+              || editorState.savedAudioOverlays.some(r => r.mediaPath === removed.mediaPath);
+            if (!stillReferenced && activeProjectPath) {
+              window.electronAPI.stageAudioOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
+            }
+          }
+        }
+      }
+
+      editorState.selectedOverlayId = null;
+      editorState.selectedAudioOverlayId = null;
+
+      // Now delete the section itself (same logic as deleteSelectedSection)
+      editorState.sections = editorState.sections.filter(s => s.id !== section.id);
+      if (section.saved) {
+        editorState.savedSections.push({ ...section });
+      } else {
+        await stageTakeIfUnreferenced(section.takeId!);
+      }
+
+      if (editorState.sections.length === 0) {
+        renderOverlayMarkers();
+        renderAudioOverlayMarkers();
+        renderOverlayList();
+        scheduleProjectSave();
+        return;
+      }
+
+      const remainingAnchors = editorState.keyframes.filter(
+        kf => kf.sectionId && kf.sectionId !== section.id
+      );
+      const remappedManual = remapManualKeyframesAfterSectionDelete(editorState.keyframes, section);
+      editorState.keyframes = [...remainingAnchors, ...remappedManual];
+
+      reindexSections(editorState.sections);
+      recalculateTimelinePositions();
+      syncSectionAnchorKeyframes();
+
+      renderSectionMarkers();
+      renderOverlayMarkers();
+      renderAudioOverlayMarkers();
+      renderOverlayList();
+      renderSectionTranscriptList();
+      refreshWaveform();
+      editorSeek(Math.min(editorState.currentTime, editorState.duration));
+      scheduleProjectSave();
+    }
+
+    function appendTakeToTimeline({ takeId, screenPath: _screenPath, cameraPath, windowPaths: _appendWindowPaths, recordedDuration, trimSections, projectSession }: AppendTakeOpts): AppendTakeResult | null {
       const takeSections = normalizeTakeSections(trimSections, recordedDuration);
       for (const section of takeSections) {
         section.takeId = takeId;
@@ -3953,11 +4667,20 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
 
       const hasCamera = !!cameraPath;
 
+      // Create window overlays from recorded window paths
+      const windowOverlays: Overlay[] = Array.isArray(_appendWindowPaths) && _appendWindowPaths.length > 0
+        ? createOverlaysFromWindowPaths(_appendWindowPaths, takeDuration)
+        : [];
+
       if (!editorState) {
         enterEditor(
           takeSections,
           {
             hasCamera,
+            overlays: windowOverlays.length > 0 ? windowOverlays : undefined,
+            // Window overlay mode uses canvas dimensions as source resolution
+            sourceWidth: windowOverlays.length > 0 ? CANVAS_W : undefined,
+            sourceHeight: windowOverlays.length > 0 ? CANVAS_H : undefined,
             initialView: 'timeline'
           }
         );
@@ -4022,6 +4745,15 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         kf => !kf.sectionId || !newAnchors.some(anchor => anchor.sectionId === kf.sectionId)
       );
 
+      // Merge existing overlays with new window overlays (offset by baseDuration)
+      const existingOverlays = editorState?.overlays || [];
+      const offsetWindowOverlays = windowOverlays.map(wo => ({
+        ...wo,
+        startTime: wo.startTime + baseDuration,
+        endTime: wo.endTime + baseDuration,
+      }));
+      const mergedOverlays = [...existingOverlays, ...offsetWindowOverlays];
+
       enterEditor(
         timelineSections,
         {
@@ -4033,7 +4765,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           sourceHeight: editorState?.sourceHeight,
           outputMode: editorState?.outputMode,
           pipScale: editorState?.pipScale,
-          overlays: editorState?.overlays,
+          overlays: mergedOverlays,
           savedOverlays: editorState?.savedOverlays,
           audioOverlays: editorState?.audioOverlays,
           savedAudioOverlays: editorState?.savedAudioOverlays,
@@ -4085,6 +4817,11 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         screenRecInterval = null;
       }
 
+      for (const interval of windowRecIntervals) {
+        clearInterval(interval);
+      }
+      windowRecIntervals = [];
+
       recorders.forEach(r => {
         if (r.state !== 'inactive') r.stop();
       });
@@ -4102,16 +4839,34 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       recordBtn.classList.replace('hover:bg-neutral-700', 'hover:bg-red-700');
       recordBtn.classList.remove('border', 'border-neutral-600');
       screenSelect.disabled = false;
+      screenPickerBtn.classList.remove('opacity-50', 'pointer-events-none');
       cameraSelect.disabled = false;
       audioSelect.disabled = false;
       timerEl.textContent = '00:00';
 
       transcriptPanel.classList.add('hidden');
 
-      if (results.screen) {
+      // Build windowPaths from results, including captured dimensions
+      const recordedWindowPaths: Array<{ name: string; path: string; width?: number; height?: number }> = [];
+      for (let i = 0; i < 2; i++) {
+        const key = `win${i}`;
+        if (results[key] && windowSourceNames[i]) {
+          let w: number | undefined;
+          let h: number | undefined;
+          if (windowVideos[i]) {
+            w = windowVideos[i]!.videoWidth || undefined;
+            h = windowVideos[i]!.videoHeight || undefined;
+          }
+          recordedWindowPaths.push({ name: windowSourceNames[i]!, path: results[key]!.path, width: w, height: h });
+        }
+      }
+      const hasWindowCaptures = recordedWindowPaths.length > 0;
+      const hasScreen = !!results.screen;
+
+      if (hasScreen || hasWindowCaptures) {
         const takeId = `take-${Date.now()}`;
         const takeCreatedAt = new Date().toISOString();
-        const screenPath = results.screen.path;
+        const screenPath = results.screen?.path || '';
         const cameraPath = results.camera?.path || null;
         let sectionsForTimeline = buildDefaultSectionsForDuration(recordedDuration);
 
@@ -4168,9 +4923,11 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
             id: takeId,
             createdAt: takeCreatedAt,
             duration: recordedDuration,
-            screenPath,
+            screenPath: screenPath || null,
             cameraPath,
             mousePath: mousePath ? `${activeProjectPath}/${mousePath}` : null,
+            proxyPath: null,
+            windowPaths: hasWindowCaptures ? recordedWindowPaths : null,
             sections: sectionsForTimeline
           });
         }
@@ -4178,8 +4935,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         try {
           const appendResult = appendTakeToTimeline({
             takeId,
-            screenPath,
+            screenPath: screenPath || '',
             cameraPath,
+            windowPaths: hasWindowCaptures ? recordedWindowPaths : null,
             recordedDuration,
             trimSections: sectionsForTimeline,
             projectSession
@@ -4193,11 +4951,22 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
               take.sections = appendResult.takeSections;
             }
             await persistProjectNow();
-            if (activeProjectPath && screenPath) {
+            if (activeProjectPath && hasScreen && screenPath) {
+              // Standard screen proxy
               proxyStatus.set(takeId, { status: 'pending', percent: 0 });
               renderSectionMarkers();
               window.electronAPI.generateProxy({ takeId, screenPath, projectFolder: activeProjectPath, durationSec: recordedDuration })
                 .catch((err: unknown) => console.warn('[Proxy] Failed to start proxy generation:', err));
+            } else if (activeProjectPath && hasWindowCaptures) {
+              // Generate a proxy for each window file
+              for (let wi = 0; wi < recordedWindowPaths.length; wi++) {
+                const wp = recordedWindowPaths[wi]!;
+                const proxyKey = `${takeId}-win${wi}`;
+                proxyStatus.set(proxyKey, { status: 'pending', percent: 0 });
+                window.electronAPI.generateProxy({ takeId: proxyKey, screenPath: wp.path, projectFolder: activeProjectPath, durationSec: recordedDuration })
+                  .catch((err: unknown) => console.warn(`[Proxy] Failed for window ${wi}:`, err));
+              }
+              renderSectionMarkers();
             }
           }
           await completeRecoveryTake();
@@ -4358,7 +5127,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
             });
           };
 
-          if (firstTake?.proxyPath && firstTake?.screenPath) {
+          // In window overlay mode, the output is always the canvas size (1920x1080)
+          // — individual window dimensions don't define the output.
+          const hasWindowOverlaysOnLoad = editorState.overlays.some(o => o.mediaType === 'window');
+          if (hasWindowOverlaysOnLoad) {
+            applySourceResolution(CANVAS_W, CANVAS_H);
+          } else if (firstTake?.proxyPath && firstTake?.screenPath) {
             const sourceProbe = document.createElement('video');
             sourceProbe.preload = 'metadata';
             sourceProbe.src = pathToFileUrl(firstTake.screenPath);
@@ -4903,10 +5677,13 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     }
 
     function syncOverlayVideo(time: number): void {
-      for (let trackIdx = 0; trackIdx < 2; trackIdx++) {
+      for (let trackIdx = 0; trackIdx < 4; trackIdx++) {
         const overlayState = getOverlayStateAtTime(time, trackIdx);
-        if (overlayState.active && overlayState.mediaType === 'video') {
-          const vid = getOverlayVideoElement(overlayState.mediaPath, trackIdx);
+        if (overlayState.active && (overlayState.mediaType === 'video' || overlayState.mediaType === 'window')) {
+          // Prefer proxyPath for window overlays when available
+          const syncOverlayObj = editorState?.overlays.find(o => o.id === overlayState.overlayId);
+          const syncVideoPath = (syncOverlayObj?.proxyPath) || overlayState.mediaPath;
+          const vid = getOverlayVideoElement(syncVideoPath, trackIdx);
           if (vid && Math.abs(vid.currentTime - overlayState.sourceTime) > 0.15) {
             vid.currentTime = overlayState.sourceTime;
           }
@@ -4928,6 +5705,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
 
     function editorDrawLoop(): void {
       if (!editorState) return;
+      try {
       if (editorState.playing && activeTakeId && activePlaybackSection) {
         const videos = getOrCreateTakeVideos(activeTakeId);
         if (videos) {
@@ -4976,7 +5754,13 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const hasCamera = editorState.hasCamera && activeVideos?.camera && activeVideos.camera.videoWidth > 0;
       const state = getStateAtTime(editorState.currentTime);
 
-      if (hasScreen) {
+      // Wallpaper base detection — draw wallpaper if any window overlays exist
+      const hasWindowOverlaysInEditor = (editorState.overlays || []).some(o => o.mediaType === 'window');
+      if (hasWindowOverlaysInEditor) {
+        // Window overlay mode: wallpaper is the base, windows render as overlays
+        drawBackground(editorCtx, CANVAS_W, CANVAS_H);
+      } else if (hasScreen) {
+        // Standard screen recording mode
         drawEditorScreenWithZoom(
           editorCtx,
           activeVideos!.screen,
@@ -4995,38 +5779,59 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const effectiveW = isReel ? REEL_CANVAS_W : CANVAS_W;
       const currentPipSize = computePipSize(state.pipScale, effectiveW);
 
-      for (let trackIdx = 0; trackIdx < 2; trackIdx++) {
+      // GROUP 4.3 + 5.3 + 5.4: Iterate all 4 overlay tracks with rounded-corner clipping
+      for (let trackIdx = 0; trackIdx < 4; trackIdx++) {
         const overlayState = getOverlayStateAtTime(editorState.currentTime, trackIdx);
         if (!overlayState.active) continue;
-        const oX = overlayState.x + (isReel ? cropPixelX : 0);
+        const oX = overlayState.x;
         const oY = overlayState.y;
         const oW = overlayState.width;
         const oH = overlayState.height;
+        if (oW <= 0 || oH <= 0) continue;
+        const cornerRadius = Math.max(0, Math.min(oW, oH) * 0.03);
+        // For window overlays, prefer proxyPath over mediaPath for playback
+        const overlayObj = editorState.overlays.find(o => o.id === overlayState.overlayId);
+        const videoPath = (overlayObj?.proxyPath) || overlayState.mediaPath;
         const mediaEl = overlayState.mediaType === 'image'
           ? getOverlayImageElement(overlayState.mediaPath)
-          : getOverlayVideoElement(overlayState.mediaPath, trackIdx);
+          : getOverlayVideoElement(videoPath, trackIdx);
         if (mediaEl && (mediaEl.tagName !== 'IMG' || (mediaEl as HTMLImageElement).complete)) {
-          editorCtx.save();
-          editorCtx.globalAlpha = overlayState.opacity;
-          editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
           const inLeft = Math.max(0, oX);
           const inTop = Math.max(0, oY);
           const inRight = Math.min(CANVAS_W, oX + oW);
           const inBottom = Math.min(CANVAS_H, oY + oH);
           if (oX < 0 || oY < 0 || oX + oW > CANVAS_W || oY + oH > CANVAS_H) {
+            // Overflow: draw at 0.3 alpha first (out-of-bounds ghost)
+            editorCtx.save();
             editorCtx.globalAlpha = overlayState.opacity * 0.3;
+            editorCtx.beginPath();
+            editorCtx.roundRect(oX, oY, oW, oH, cornerRadius);
+            editorCtx.clip();
             editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
+            editorCtx.restore();
+            // Then draw the in-bounds portion at full alpha with rounded corners
             if (inRight > inLeft && inBottom > inTop) {
-              editorCtx.globalAlpha = overlayState.opacity;
               editorCtx.save();
+              editorCtx.globalAlpha = overlayState.opacity;
               editorCtx.beginPath();
               editorCtx.rect(inLeft, inTop, inRight - inLeft, inBottom - inTop);
+              editorCtx.clip();
+              editorCtx.beginPath();
+              editorCtx.roundRect(oX, oY, oW, oH, cornerRadius);
               editorCtx.clip();
               editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
               editorCtx.restore();
             }
+          } else {
+            // Fully in bounds: draw with rounded-corner clipping
+            editorCtx.save();
+            editorCtx.globalAlpha = overlayState.opacity;
+            editorCtx.beginPath();
+            editorCtx.roundRect(oX, oY, oW, oH, cornerRadius);
+            editorCtx.clip();
+            editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
+            editorCtx.restore();
           }
-          editorCtx.restore();
         }
         if (overlayState.overlayId === editorState.selectedOverlayId) {
           editorCtx.save();
@@ -5044,6 +5849,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         }
       }
 
+      // GROUP 5.2: Camera PIP drawn AFTER all overlay tracks
       if (hasCamera) {
         if (state.camTransition > 0 && state.opacity > 0) {
           editorCtx.save();
@@ -5086,6 +5892,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         editorCtx.restore();
       }
 
+      } catch (err) {
+        console.error('[editorDrawLoop] Error during draw:', err);
+      }
       scheduleEditorDrawLoop();
     }
 
@@ -5203,12 +6012,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
 
       if (editorState.selectedOverlayId) {
         let overlayS: OverlayState | null = null;
-        for (let t = 1; t >= 0; t--) {
+        for (let t = 3; t >= 0; t--) {
           const s = getOverlayStateAtTime(editorState.currentTime, t);
           if (s.active && s.overlayId === editorState.selectedOverlayId) { overlayS = s; break; }
         }
         if (overlayS && overlayS.active) {
-          const oX = overlayS.x + (isReel ? cropOffsetX : 0);
+          const oX = overlayS.x;
           const oY = overlayS.y;
           const oW = overlayS.width;
           const oH = overlayS.height;
@@ -5268,6 +6077,12 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           e.preventDefault();
           return;
         }
+      }
+
+      // GROUP 6.4: Canvas background click deselects overlay
+      if (editorState.selectedOverlayId) {
+        editorState.selectedOverlayId = null;
+        renderOverlayMarkers();
       }
 
       const activeSection = findSectionForTime(editorState.currentTime);
@@ -5621,7 +6436,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         const duration = isVideo ? 5 : 3;
         const sourceStart = 0;
 
-        const dropTrackIndex: number = e._overlayDropTrackIndex || 0;
+        // Media overlays go to tracks 2-3 (not window tracks 0-1)
+        const rawDropTrack: number = e._overlayDropTrackIndex ?? 2;
+        const dropTrackIndex = rawDropTrack < 2 ? 2 : rawDropTrack;
 
         pushUndo();
         const placedStart = placeOverlayAtTime(null, editorState.currentTime, duration, editorState.duration, dropTrackIndex);
@@ -5660,7 +6477,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
     editorCanvas.addEventListener('drop', handleOverlayDrop);
 
     // ===== Overlay track drop targets =====
-    for (const [trackEl, trackIdx] of [[editorOverlayTrack0, 0], [editorOverlayTrack1, 1]] as const) {
+    for (let _trackIdx = 0; _trackIdx < 4; _trackIdx++) {
+      const trackEl = overlayTrackEls[_trackIdx]!;
+      const trackIdx = _trackIdx;
       trackEl.addEventListener('dragover', (e: DragEvent) => {
         if (!editorState || editorState.rendering) return;
         e.preventDefault();
@@ -5668,6 +6487,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       });
       trackEl.addEventListener('drop', (e: DragEvent) => {
         e.preventDefault();
+        // Tracks 0-1 are window-only, reject user media drops on them
+        if (trackIdx < 2) return;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- attach track index for shared handler
         (e as any)._overlayDropTrackIndex = trackIdx;
         handleOverlayDrop(e);
@@ -5710,15 +6531,21 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
             const pct = Math.max(0, Math.min(1, (e2.clientX - rect.left) / rect.width));
             lastDragTargetTime = Math.max(0, Math.min(editorState!.duration - overlayMoveDuration, pct * editorState!.duration - overlayMoveDuration / 2));
 
-            const rect0 = editorOverlayTrack0.getBoundingClientRect();
-            const rect1 = editorOverlayTrack1.getBoundingClientRect();
-            if (e2.clientY >= rect1.top && e2.clientY <= rect1.bottom) {
-              lastDragTargetTrack = 1;
-            } else if (e2.clientY >= rect0.top && e2.clientY <= rect0.bottom) {
-              lastDragTargetTrack = 0;
+            // Determine target track from mouse Y, locked to same type range
+            // Window overlays (tracks 0-1) can only move within 0-1
+            // Media overlays (tracks 2-3) can only move within 2-3
+            const isWindowOverlay = overlay.mediaType === 'window';
+            const minTrack = isWindowOverlay ? 0 : 2;
+            const maxTrack = isWindowOverlay ? 1 : 3;
+            for (let ti = minTrack; ti <= maxTrack; ti++) {
+              const trackRect = overlayTrackEls[ti]!.getBoundingClientRect();
+              if (e2.clientY >= trackRect.top && e2.clientY <= trackRect.bottom) {
+                lastDragTargetTrack = ti;
+                break;
+              }
             }
 
-            const targetTrackEl = lastDragTargetTrack === 1 ? editorOverlayTrack1 : editorOverlayTrack0;
+            const targetTrackEl = overlayTrackEls[Math.min(lastDragTargetTrack, 3)] || overlayTrackEls[0]!;
 
             if (!dragGhostEl) {
               dragGhostEl = document.createElement('div');
@@ -5727,7 +6554,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
               dragGhostEl.style.boxShadow = '0 0 8px rgba(99,102,241,0.5)';
               targetTrackEl.appendChild(dragGhostEl);
               currentGhostParent = targetTrackEl;
-              const origTrackEl = overlayMoveOrigTrack === 1 ? editorOverlayTrack1 : editorOverlayTrack0;
+              const origTrackEl = overlayTrackEls[Math.min(overlayMoveOrigTrack, 3)] || overlayTrackEls[0]!;
               const origBand = origTrackEl.querySelector(`[data-overlay-id="${overlayId}"]`) as HTMLElement | null;
               if (origBand) origBand.style.opacity = '0.25';
             }
@@ -6058,8 +6885,15 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       pushUndo();
       const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
       const pos = overlay[mode];
-      const canvasW = mode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
-      pos.x = Math.round((canvasW - pos.width) / 2);
+      if (mode === 'reel') {
+        // Overlay positions are in landscape canvas space; center within the reel crop area
+        const kf = getStateAtTime(editorState.currentTime);
+        const cw = getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode);
+        const cropOffset = reelCropXToPixelOffset(kf.reelCropX, kf.backgroundZoom, cw);
+        pos.x = Math.round(cropOffset + (REEL_CANVAS_W - pos.width) / 2);
+      } else {
+        pos.x = Math.round((CANVAS_W - pos.width) / 2);
+      }
       pos.y = Math.round((CANVAS_H - pos.height) / 2);
       scheduleProjectSave();
     }
@@ -6195,13 +7029,13 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       if (!resolved) return;
 
       const take = activeProject?.takes?.find((t: Take) => t.id === resolved.takeId);
-      if (!take?.screenPath) return;
+      const hasWindowOverlays = (editorState.overlays || []).some(o => o.mediaType === 'window');
+      if (!take?.screenPath && !hasWindowOverlays) return;
 
       capturingThumbnail = true;
       showThumbnailToast('Capturing...');
 
       try {
-        // Frozen keyframe: interpolated visual state at current time, placed at time 0
         const state = getStateAtTime(editorState.currentTime);
         const frozenKeyframe: Keyframe = {
           time: 0,
@@ -6225,25 +7059,27 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           backgroundFocusY: state.backgroundFocusY
         };
 
-        // Filter overlays visible at current time, adjusted for single-frame capture
         const currentTime = editorState.currentTime;
         const visibleOverlays = (editorState.overlays || [])
           .filter(o => o.startTime <= currentTime && currentTime < o.endTime)
           .map(o => {
             const delta = currentTime - o.startTime;
+            const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
             return {
               ...o,
               startTime: 0,
               endTime: 0.1,
-              sourceStart: o.mediaType === 'video' ? o.sourceStart + delta : o.sourceStart,
-              sourceEnd: o.mediaType === 'video' ? o.sourceStart + delta + 0.1 : o.sourceEnd
+              sourceStart: isVideoLike ? o.sourceStart + delta : o.sourceStart,
+              sourceEnd: isVideoLike ? o.sourceStart + delta + 0.1 : o.sourceEnd
             };
           });
 
         await window.electronAPI.captureThumbnail({
-          takes: [{ id: take.id, screenPath: take.screenPath, cameraPath: take.cameraPath, mousePath: take.mousePath || null }],
+          takes: take ? [{ id: take.id, screenPath: take.screenPath, cameraPath: take.cameraPath, mousePath: take.mousePath || null, windowPaths: take.windowPaths || null }] : [],
           keyframes: [frozenKeyframe],
           overlays: visibleOverlays,
+          wallpaperPath: hasWindowOverlays ? backgroundImagePath : null,
+          timelineTime: editorState.currentTime,
           sourceTime: resolved.sourceTime,
           cameraSyncOffsetMs: editorState.cameraSyncOffsetMs,
           sourceWidth: editorState.sourceWidth || CANVAS_W,
@@ -6287,11 +7123,11 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         const renderSections = getRenderSections();
 
         const referencedTakeIds = new Set(editorState!.sections.map(s => s.takeId).filter(Boolean) as string[]);
-        const takes: Array<{ id: string; screenPath: string | null; cameraPath: string | null; mousePath: string | null }> = [];
+        const takes: Array<{ id: string; screenPath: string | null; cameraPath: string | null; mousePath: string | null; windowPaths: Array<{ name: string; path: string }> | null }> = [];
         for (const takeId of referencedTakeIds) {
           const take = activeProject?.takes?.find((t: Take) => t.id === takeId);
           if (take) {
-            takes.push({ id: take.id, screenPath: take.screenPath, cameraPath: take.cameraPath, mousePath: take.mousePath || null });
+            takes.push({ id: take.id, screenPath: take.screenPath, cameraPath: take.cameraPath, mousePath: take.mousePath || null, windowPaths: take.windowPaths || null });
           }
         }
 
@@ -6308,6 +7144,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
           outputMode: editorState!.outputMode || 'landscape',
           overlays: editorState!.overlays || [],
           audioOverlays: editorState!.audioOverlays || [],
+          wallpaperPath: backgroundImagePath,
           outputFolder: saveFolder
         });
 
@@ -6403,6 +7240,13 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         return;
       }
 
+      // Cmd+B: pick background image — works in both recording and editor views
+      if (e.code === 'KeyB' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        pickAndLoadBackground();
+        return;
+      }
+
       if (!editorState || editorState.rendering || activeWorkspaceView !== 'timeline') return;
       if ((e.target as HTMLElement).tagName === 'SELECT' || (e.target as HTMLElement).tagName === 'INPUT') return;
 
@@ -6445,19 +7289,23 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         if (prevB !== null) editorSeek(prevB);
       } else if (e.code === 'Backspace' || e.code === 'Delete') {
         e.preventDefault();
-        if (editorState?.selectedAudioOverlayId) {
-          deleteSelectedAudioOverlay();
+        if (e.metaKey || e.ctrlKey) {
+          deleteAllAtPlayhead();
         } else if (editorState?.selectedOverlayId) {
           deleteSelectedOverlay();
+        } else if (editorState?.selectedAudioOverlayId) {
+          deleteSelectedAudioOverlay();
         } else {
           deleteSelectedSection();
         }
       } else if (e.code === 'KeyS') {
         e.preventDefault();
-        if (editorState?.selectedAudioOverlayId) {
-          splitAudioOverlayAtPlayhead();
+        if (e.metaKey || e.ctrlKey) {
+          splitAllAtPlayhead();
         } else if (editorState?.selectedOverlayId) {
           splitOverlayAtPlayhead();
+        } else if (editorState?.selectedAudioOverlayId) {
+          splitAudioOverlayAtPlayhead();
         } else {
           splitSectionAtPlayhead();
         }
@@ -6653,7 +7501,8 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       recording, screenStream, cameraStream, audioStream,
       recorders, screenRecInterval, audioSendInterval, timerInterval,
       audioContext, scribeWorkletNode, scribeWs,
-      drawRAF, meterRAF, cancelEditorDrawLoop, stopAudioMeter
+      drawRAF, meterRAF, cancelEditorDrawLoop, stopAudioMeter,
+      windowStreams, windowRecIntervals
     });
 
     setWorkspaceView('home');
@@ -6681,7 +7530,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         drawRAF,
         meterRAF,
         cancelEditorDrawLoop,
-        stopAudioMeter
+        stopAudioMeter,
+        windowStreams,
+        windowRecIntervals
       });
       recording = false;
       screenStream = null;

@@ -167,7 +167,7 @@ export function buildCamFullAlphaExpr(keyframes: Keyframe[]): string {
   return expr;
 }
 
-function getContentWidth(
+export function getContentWidth(
   sourceW: number | null,
   sourceH: number | null,
   fitMode: ScreenFitMode,
@@ -474,7 +474,8 @@ export function buildOverlayFilter(
   inputOffset: number,
   baseLabel: string,
   outputMode: OutputMode = 'landscape',
-  timelineDuration: number = 0
+  timelineDuration: number = 0,
+  targetFps: number = 30
 ): OverlayFilterResult & { outputLabel: string } {
   if (!Array.isArray(overlays) || overlays.length === 0) {
     return { inputs: [], filterParts: [], outputLabel: baseLabel };
@@ -498,6 +499,12 @@ export function buildOverlayFilter(
     const renderY = Math.round(pos.y * scaleY);
     const duration = o.endTime - o.startTime;
 
+    // Check if this segment has same-media neighbor -- affects fade and transitions
+    const next = i < overlays.length - 1 ? overlays[i + 1]! : null;
+    const prev = i > 0 ? overlays[i - 1]! : null;
+    const hasNextSameMedia = next && next.mediaPath === o.mediaPath && (next.trackIndex || 0) === (o.trackIndex || 0) && Math.abs(next.startTime - o.endTime) < 0.01;
+    const hasPrevSameMedia = prev && prev.mediaPath === o.mediaPath && (prev.trackIndex || 0) === (o.trackIndex || 0) && Math.abs(o.startTime - prev.endTime) < 0.01;
+
     // Build input args
     if (o.mediaType === 'image') {
       inputs.push(['-loop', '1', '-t', duration.toFixed(3), '-i']);
@@ -510,13 +517,43 @@ export function buildOverlayFilter(
     const prepLabel = `ovl_prep_${i}`;
     const overlayLabel = `ovl_${i}`;
 
+    // Determine if this segment transitions from a previous same-media segment
+    const prevRenderW = hasPrevSameMedia ? Math.max(2, Math.round((prev![mode] || pos).width * scaleX)) : renderW;
+    const prevRenderH = hasPrevSameMedia ? Math.max(2, Math.round((prev![mode] || pos).height * scaleY)) : renderH;
+    const sizeTransition = hasPrevSameMedia && (prevRenderW !== renderW || prevRenderH !== renderH);
+
     const prepParts: string[] = [];
-    if (o.mediaType === 'video') {
+    if (o.mediaType === 'video' || o.mediaType === 'window') {
       prepParts.push(`trim=start=${o.sourceStart.toFixed(3)}:end=${o.sourceEnd.toFixed(3)}`);
       prepParts.push('setpts=PTS-STARTPTS');
+      prepParts.push(`fps=fps=${targetFps}`);
     }
-    prepParts.push(`scale=${renderW}:${renderH}`);
+
+    // For size transitions, scale to the max of both sizes so geq has stable dimensions,
+    // then add an animated scale after geq to interpolate from prev→current size.
+    const geqW = sizeTransition ? Math.max(prevRenderW, renderW) : renderW;
+    const geqH = sizeTransition ? Math.max(prevRenderH, renderH) : renderH;
+    prepParts.push(`scale=${geqW}:${geqH}`);
     prepParts.push('format=yuva420p');
+
+    // Rounded corners (3% of smaller dimension, matching canvas roundRect)
+    const cornerR = Math.max(1, Math.round(Math.min(geqW, geqH) * 0.03));
+    if (cornerR >= 2) {
+      const maxX = geqW - 1 - cornerR;
+      const maxY = geqH - 1 - cornerR;
+      const rSq = cornerR * cornerR;
+      prepParts.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*lte(pow(max(0,max(${cornerR}-X,X-${maxX})),2)+pow(max(0,max(${cornerR}-Y,Y-${maxY})),2),${rSq})'`);
+    }
+
+    // Animated size transition: interpolate from prev size to current during first FADE seconds
+    // Uses local time (t starts at 0, before PTS shift).
+    // Use 2*round(.../2) to keep even dimensions (required by yuva420p).
+    if (sizeTransition) {
+      const f = FADE.toFixed(3);
+      const wExpr = `if(gte(t,${f}),${renderW},2*round((${prevRenderW}+(${renderW}-${prevRenderW})*t/${f})/2))`;
+      const hExpr = `if(gte(t,${f}),${renderH},2*round((${prevRenderH}+(${renderH}-${prevRenderH})*t/${f})/2))`;
+      prepParts.push(`scale=w='${wExpr}':h='${hExpr}':eval=frame`);
+    }
 
     // Shift PTS to rendered timeline position so fade times align with enable window
     prepParts.push(`setpts=PTS+${o.startTime.toFixed(3)}/TB`);
@@ -526,12 +563,6 @@ export function buildOverlayFilter(
     const fadeOutTime = o.endTime - FADE;
     const fadeIn = `fade=in:st=${fadeInTime.toFixed(3)}:d=${FADE.toFixed(3)}:alpha=1`;
     const fadeOut = `fade=out:st=${fadeOutTime.toFixed(3)}:d=${FADE.toFixed(3)}:alpha=1`;
-
-    // Check if this segment has same-media neighbor -- suppress fade at boundary
-    const next = i < overlays.length - 1 ? overlays[i + 1]! : null;
-    const prev = i > 0 ? overlays[i - 1]! : null;
-    const hasNextSameMedia = next && next.mediaPath === o.mediaPath && (next.trackIndex || 0) === (o.trackIndex || 0) && Math.abs(next.startTime - o.endTime) < 0.01;
-    const hasPrevSameMedia = prev && prev.mediaPath === o.mediaPath && (prev.trackIndex || 0) === (o.trackIndex || 0) && Math.abs(o.startTime - prev.endTime) < 0.01;
 
     // Skip fade-in at video start, skip fade-out at video end
     const atVideoStart = o.startTime < 0.01;
@@ -544,21 +575,27 @@ export function buildOverlayFilter(
 
     filterParts.push(`${overlayInputLabel}${prepParts.join(',')}[${prepLabel}]`);
 
-    // Position -- static or animated for same-media transitions
+    // Position -- static or animated for same-media transitions.
+    // The SECOND segment handles the transition (matching canvas behavior):
+    // it interpolates from prev position to its own during the first FADE seconds.
     let xExpr = String(renderX);
     let yExpr = String(renderY);
     let useEvalFrame = false;
 
-    if (hasNextSameMedia) {
-      const nextPos = next![mode] || { x: 0, y: 0, width: 400, height: 300 };
-      const nextRenderX = Math.round(nextPos.x * scaleX);
-      const nextRenderY = Math.round(nextPos.y * scaleY);
-      if (nextRenderX !== renderX || nextRenderY !== renderY) {
-        // Use absolute times -- t in overlay filter x/y expressions is the main stream's timestamp
-        const tStart = (o.endTime - FADE).toFixed(3);
-        const tEnd = o.endTime.toFixed(3);
-        xExpr = `if(gte(t,${tEnd}),${nextRenderX},if(gte(t,${tStart}),${renderX}+(${nextRenderX}-${renderX})*(t-${tStart})/${FADE.toFixed(3)},${renderX}))`;
-        yExpr = `if(gte(t,${tEnd}),${nextRenderY},if(gte(t,${tStart}),${renderY}+(${nextRenderY}-${renderY})*(t-${tStart})/${FADE.toFixed(3)},${renderY}))`;
+    if (hasPrevSameMedia) {
+      const prevPos = prev![mode] || { x: 0, y: 0, width: 400, height: 300 };
+      const prevRenderX = Math.round(prevPos.x * scaleX);
+      const prevRenderY = Math.round(prevPos.y * scaleY);
+      if (prevRenderX !== renderX || prevRenderY !== renderY || sizeTransition) {
+        // Animate from prev position to current during first FADE seconds of this segment
+        const tStart = o.startTime.toFixed(3);
+        const tEnd = (o.startTime + FADE).toFixed(3);
+        xExpr = prevRenderX !== renderX
+          ? `if(gte(t,${tEnd}),${renderX},${prevRenderX}+(${renderX}-${prevRenderX})*(t-${tStart})/${FADE.toFixed(3)})`
+          : String(renderX);
+        yExpr = prevRenderY !== renderY
+          ? `if(gte(t,${tEnd}),${renderY},${prevRenderY}+(${renderY}-${prevRenderY})*(t-${tStart})/${FADE.toFixed(3)})`
+          : String(renderY);
         useEvalFrame = true;
       }
     }

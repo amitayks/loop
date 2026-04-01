@@ -196,7 +196,14 @@ export function createProjectService({ app }: { app: AppLike }) {
       screenPath: toProjectRelativePath(projectFolder, take.screenPath),
       cameraPath: toProjectRelativePath(projectFolder, take.cameraPath),
       mousePath: toProjectRelativePath(projectFolder, take.mousePath),
-      proxyPath: toProjectRelativePath(projectFolder, take.proxyPath)
+      proxyPath: toProjectRelativePath(projectFolder, take.proxyPath),
+      windowPaths: Array.isArray(take.windowPaths)
+        ? take.windowPaths.map((wp) => ({
+            ...wp,
+            path: toProjectRelativePath(projectFolder, wp.path) ?? wp.path,
+            proxyPath: wp.proxyPath ? toProjectRelativePath(projectFolder, wp.proxyPath) : wp.proxyPath
+          }))
+        : take.windowPaths
     }));
 
     writeJsonFile(getProjectFilePath(projectFolder), serializable);
@@ -476,6 +483,14 @@ export function createProjectService({ app }: { app: AppLike }) {
       } else {
         if (take.screenPath) safeUnlink(take.screenPath);
         if (take.cameraPath) safeUnlink(take.cameraPath);
+        if (take.mousePath) safeUnlink(take.mousePath);
+        if (take.proxyPath) safeUnlink(take.proxyPath);
+        if (Array.isArray(take.windowPaths)) {
+          for (const wp of take.windowPaths) {
+            if (wp.path) safeUnlink(wp.path);
+            if (wp.proxyPath) safeUnlink(wp.proxyPath);
+          }
+        }
         removedCount += 1;
       }
     }

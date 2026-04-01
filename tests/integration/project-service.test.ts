@@ -513,4 +513,100 @@ describe('main/services/project-service integration', () => {
     expect(fs.existsSync(proxyFile)).toBe(true);
     expect(fs.readFileSync(proxyFile, 'utf8')).toBe('proxy-data');
   });
+
+  test('saveProject serializes windowPaths with relative paths and round-trips on open', () => {
+    const created = service.createProject({ name: 'WindowProxy', parentFolder: sandbox.root });
+    const win0File = path.join(created.projectPath, 'win0.webm');
+    const win0Proxy = path.join(created.projectPath, 'win0-proxy.mp4');
+    const win1File = path.join(created.projectPath, 'win1.webm');
+    fs.writeFileSync(win0File, 'win0-data', 'utf8');
+    fs.writeFileSync(win0Proxy, 'win0-proxy-data', 'utf8');
+    fs.writeFileSync(win1File, 'win1-data', 'utf8');
+
+    service.saveProject({
+      projectPath: created.projectPath,
+      project: {
+        ...created.project,
+        takes: [{
+          id: 'take-1',
+          duration: 5,
+          screenPath: null,
+          cameraPath: null,
+          sections: [],
+          windowPaths: [
+            { name: 'VS Code', path: win0File, proxyPath: win0Proxy, width: 1920, height: 1080 },
+            { name: 'Chrome', path: win1File, width: 1280, height: 720 }
+          ]
+        }]
+      }
+    });
+
+    // On disk, paths should be relative
+    const raw = JSON.parse(fs.readFileSync(path.join(created.projectPath, 'project.json'), 'utf8'));
+    expect(raw.takes[0].windowPaths[0].path).toBe('win0.webm');
+    expect(raw.takes[0].windowPaths[0].proxyPath).toBe('win0-proxy.mp4');
+    expect(raw.takes[0].windowPaths[1].path).toBe('win1.webm');
+
+    // On open, paths should be absolute again
+    const opened = service.openProject(created.projectPath);
+    expect(opened.project.takes[0]!.windowPaths![0]!.path).toBe(win0File);
+    expect(opened.project.takes[0]!.windowPaths![0]!.proxyPath).toBe(win0Proxy);
+    expect(opened.project.takes[0]!.windowPaths![1]!.path).toBe(win1File);
+  });
+
+  test('cleanupUnusedTakes removes window files and proxy files for unreferenced takes', () => {
+    const created = service.createProject({ name: 'CleanupWin', parentFolder: sandbox.root });
+    const usedScreen = path.join(created.projectPath, 'used-screen.webm');
+    const unusedWin0 = path.join(created.projectPath, 'unused-win0.webm');
+    const unusedWin0Proxy = path.join(created.projectPath, 'unused-win0-proxy.mp4');
+    const unusedProxy = path.join(created.projectPath, 'unused-proxy.mp4');
+    const unusedMouse = path.join(created.projectPath, 'unused-mouse.json');
+    fs.writeFileSync(usedScreen, 'used', 'utf8');
+    fs.writeFileSync(unusedWin0, 'win0', 'utf8');
+    fs.writeFileSync(unusedWin0Proxy, 'win0-proxy', 'utf8');
+    fs.writeFileSync(unusedProxy, 'proxy', 'utf8');
+    fs.writeFileSync(unusedMouse, '{}', 'utf8');
+
+    service.saveProject({
+      projectPath: created.projectPath,
+      project: {
+        ...created.project,
+        takes: [
+          { id: 'take-used', screenPath: usedScreen, cameraPath: null, duration: 2 },
+          {
+            id: 'take-unused',
+            screenPath: null,
+            cameraPath: null,
+            mousePath: unusedMouse,
+            proxyPath: unusedProxy,
+            duration: 3,
+            windowPaths: [
+              { name: 'Win0', path: unusedWin0, proxyPath: unusedWin0Proxy }
+            ]
+          }
+        ],
+        timeline: {
+          duration: 2,
+          sections: [{ start: 0, end: 2, takeId: 'take-used' }],
+          savedSections: [],
+          keyframes: [],
+          selectedSectionId: null,
+          hasCamera: false,
+          sourceWidth: null,
+          sourceHeight: null
+        }
+      }
+    });
+
+    const result = service.cleanupUnusedTakes(created.projectPath);
+    expect(result.removedCount).toBe(1);
+
+    // All unused take files should be deleted
+    expect(fs.existsSync(unusedWin0)).toBe(false);
+    expect(fs.existsSync(unusedWin0Proxy)).toBe(false);
+    expect(fs.existsSync(unusedProxy)).toBe(false);
+    expect(fs.existsSync(unusedMouse)).toBe(false);
+    // Used take file should remain
+    expect(fs.existsSync(usedScreen)).toBe(true);
+  });
 });

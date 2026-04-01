@@ -548,7 +548,7 @@ describe('main/services/render-filter-service', () => {
     expect(result.outputLabel).toBe('screen');
   });
 
-  test('buildOverlayFilter generates image overlay filter', () => {
+  test('buildOverlayFilter generates image overlay filter with border radius', () => {
     const overlays = [{
       id: 'o1', mediaPath: 'overlay-media/img.png', mediaType: 'image',
       startTime: 5, endTime: 10, sourceStart: 0, sourceEnd: 5,
@@ -563,6 +563,9 @@ describe('main/services/render-filter-service', () => {
     expect(result.filterParts[0]!).toContain('setpts=PTS+5.000/TB');
     expect(result.filterParts[0]!).toContain('fade=in:st=5.000');
     expect(result.filterParts[0]!).toContain('fade=out:st=9.700');
+    // Border radius: 3% of min(400,300) = 9px
+    expect(result.filterParts[0]!).toContain('geq=');
+    expect(result.filterParts[0]!).toContain("a='255*");
     expect(result.filterParts[1]!).toContain("enable='between(t,5.000,10.000)'");
     expect(result.filterParts[1]!).toContain("x='200'");
     expect(result.filterParts[1]!).toContain("y='100'");
@@ -642,7 +645,7 @@ describe('main/services/render-filter-service', () => {
     expect(result.filterParts[2]!).not.toContain('fade=out');
   });
 
-  test('buildOverlayFilter uses absolute times for position interpolation expressions', () => {
+  test('buildOverlayFilter animates position on SECOND segment matching canvas timing', () => {
     const overlays = [
       { id: 'o1', mediaPath: 'img.png', mediaType: 'image', startTime: 4, endTime: 9, sourceStart: 0, sourceEnd: 5,
         landscape: { x: 100, y: 100, width: 400, height: 300 }, reel: { x: 0, y: 0, width: 200, height: 150 } },
@@ -650,14 +653,34 @@ describe('main/services/render-filter-service', () => {
         landscape: { x: 500, y: 300, width: 400, height: 300 }, reel: { x: 0, y: 0, width: 200, height: 150 } }
     ];
     const result = buildOverlayFilter(overlays, 1920, 1080, 1920, 1080, 2, 'screen', 'landscape');
-    // The first segment's overlay filter should use absolute endTime (9.0) not relative duration (5.0)
-    // Position animation should happen at t=8.700 to t=9.000 (last 0.3s of segment)
-    const overlayExpr = result.filterParts[1]!;
-    expect(overlayExpr).toContain('8.700');
-    expect(overlayExpr).toContain('9.000');
-    // Should NOT use relative duration-based thresholds
-    expect(overlayExpr).not.toContain('gte(t,5.000)');
-    expect(overlayExpr).not.toContain('gte(t,4.700)');
+    // First segment: static position, no animation (canvas keeps first segment static)
+    const firstOverlay = result.filterParts[1]!;
+    expect(firstOverlay).toContain("x='100'");
+    expect(firstOverlay).toContain("y='100'");
+    // Second segment: animates from prev pos (100,100) to own pos (500,300)
+    // during first 0.3s (t=9.000 to t=9.300)
+    const secondOverlay = result.filterParts[3]!;
+    expect(secondOverlay).toContain('9.000');
+    expect(secondOverlay).toContain('9.300');
+    expect(secondOverlay).toContain('eval=frame');
+  });
+
+  test('buildOverlayFilter animates size during same-media transition', () => {
+    const overlays = [
+      { id: 'o1', mediaPath: 'img.png', mediaType: 'image', startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+        landscape: { x: 100, y: 100, width: 400, height: 300 }, reel: { x: 0, y: 0, width: 200, height: 150 } },
+      { id: 'o2', mediaPath: 'img.png', mediaType: 'image', startTime: 5, endTime: 10, sourceStart: 0, sourceEnd: 5,
+        landscape: { x: 200, y: 200, width: 600, height: 400 }, reel: { x: 0, y: 0, width: 300, height: 200 } }
+    ];
+    const result = buildOverlayFilter(overlays, 1920, 1080, 1920, 1080, 2, 'screen', 'landscape');
+    const secondPrep = result.filterParts[2]!;
+    // Second segment: geq at max size (600x400), then animated scale from 400x300 to 600x400
+    expect(secondPrep).toContain('scale=600:400');
+    expect(secondPrep).toContain("scale=w='if(gte(t,0.300),600,2*round((400");
+    expect(secondPrep).toContain('eval=frame');
+    // Overlay position should also animate
+    const secondOverlay = result.filterParts[3]!;
+    expect(secondOverlay).toContain('eval=frame');
   });
 
   test('buildOverlayFilter handles overlays on different tracks with time overlap', () => {

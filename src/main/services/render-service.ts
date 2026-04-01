@@ -16,7 +16,7 @@ import {
 } from '../../shared/domain/project.js';
 import { chooseRenderFps, probeVideoFpsWithFfmpeg } from './fps-service.js';
 import { runFfmpeg } from './ffmpeg-runner.js';
-import { buildFilterComplex, buildScreenFilter, buildOverlayFilter, buildAudioOverlayFilter, resolveOutputSize } from './render-filter-service.js';
+import { buildFilterComplex, buildScreenFilter, buildOverlayFilter, buildAudioOverlayFilter, resolveOutputSize, buildNumericExpr, getContentWidth } from './render-filter-service.js';
 import { readJsonFile } from '../infra/file-system.js';
 import { subsampleTrail } from '../../shared/domain/mouse-trail.js';
 import ffmpegStatic from 'ffmpeg-static';
@@ -146,11 +146,14 @@ function buildInputPlan(
 
     let inputPlan = takeInputs.get(section.takeId);
     if (!inputPlan) {
-      assertFilePath(take.screenPath, 'Screen');
-      args.push('-i', take.screenPath);
-      fpsProbePaths.add(take.screenPath);
+      let screenIdx = -1;
+      if (take.screenPath && typeof take.screenPath === 'string' && take.screenPath.trim()) {
+        assertFilePath(take.screenPath, 'Screen');
+        args.push('-i', take.screenPath);
+        fpsProbePaths.add(take.screenPath);
+        screenIdx = inputIndex++;
+      }
 
-      const screenIdx = inputIndex++;
       let cameraIdx = -1;
       if (hasCamera && take.cameraPath) {
         assertFilePath(take.cameraPath, 'Camera');
@@ -187,6 +190,10 @@ function buildOutputArgs(targetFps: number, outputPath: string): string[] {
     '12',
     '-preset',
     'slow',
+    '-profile:v',
+    'high',
+    '-pix_fmt',
+    'yuv420p',
     '-g',
     String(targetFps * 2),
     '-c:a',
@@ -338,10 +345,12 @@ async function renderComposite(
   const takes = Array.isArray(opts.takes) ? opts.takes : [];
   const sections = normalizeSectionInput(opts.sections);
   const keyframes: Keyframe[] = Array.isArray(opts.keyframes) ? opts.keyframes : [];
-  const overlays = Array.isArray(opts.overlays)
+  const rawOverlays = Array.isArray(opts.overlays)
     ? opts.overlays.filter(o => o && o.mediaPath && o.mediaType).sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0) || a.startTime - b.startTime)
     : [];
   const audioOverlays = normalizeAudioOverlays(opts.audioOverlays);
+  const wallpaperPath = typeof opts.wallpaperPath === 'string' && opts.wallpaperPath ? opts.wallpaperPath : null;
+  const hasWindowOverlays = rawOverlays.some(o => o.mediaType === 'window');
   const pipSize = Number.isFinite(Number(opts.pipSize)) ? Number(opts.pipSize) : 422;
   const screenFitMode = opts.screenFitMode === 'fit' ? 'fit' as const : 'fill' as const;
   const exportAudioPreset = normalizeExportAudioPreset(opts.exportAudioPreset);
@@ -378,6 +387,35 @@ async function renderComposite(
   const { args, fpsProbePaths, sectionInputs } = buildInputPlan(sections, takeMap, hasCamera);
   const totalDurationSec = getTotalDurationSec(sections);
 
+  // Clamp overlays to the timeline duration so they don't extend the output
+  const overlays = rawOverlays
+    .filter(o => o.startTime < totalDurationSec)
+    .map(o => {
+      if (o.endTime <= totalDurationSec) return o;
+      const clampedEnd = totalDurationSec;
+      const origDuration = Math.max(0.001, o.endTime - o.startTime);
+      const clampedDuration = clampedEnd - o.startTime;
+      const sourceDuration = o.sourceEnd - o.sourceStart;
+      const clampedSourceEnd = o.sourceStart + sourceDuration * (clampedDuration / origDuration);
+      return { ...o, endTime: clampedEnd, sourceEnd: clampedSourceEnd };
+    });
+
+  // When window overlays are present and some sections lack a screen recording,
+  // inject a wallpaper image or solid-color base as a synthetic screen input.
+  let wallpaperIdx = -1;
+  const needsWallpaperBase = hasWindowOverlays && sectionInputs.some(si => si.screenIdx < 0);
+  if (needsWallpaperBase) {
+    let currentInputCount = 0;
+    for (const a of args) { if (a === '-i') currentInputCount += 1; }
+    wallpaperIdx = currentInputCount;
+    if (wallpaperPath && fs.existsSync(wallpaperPath)) {
+      args.push('-loop', '1', '-t', totalDurationSec.toFixed(3), '-i', wallpaperPath);
+    } else {
+      args.push('-f', 'lavfi', '-t', totalDurationSec.toFixed(3), '-i',
+        `color=c=0x1E1E1E:s=${sourceWidth}x${sourceHeight}:r=30`);
+    }
+  }
+
   const fpsProbeResults = await Promise.all(
     Array.from(fpsProbePaths).map(async (filePath) => ({
       filePath,
@@ -401,19 +439,40 @@ async function renderComposite(
   );
 
   const filterParts: string[] = [];
+
   for (let i = 0; i < sections.length; i += 1) {
     const section = sections[i]!;
-    const { screenIdx } = sectionInputs[i]!;
+    const inputs = sectionInputs[i]!;
     const start = section.sourceStart.toFixed(3);
     const end = section.sourceEnd.toFixed(3);
-    filterParts.push(
-      `[${screenIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=fps=${targetFps},setsar=1[sv${i}]`
-    );
+    const duration = (section.sourceEnd - section.sourceStart).toFixed(3);
     const sectionVolume = section.volume;
     const volumeFilter = (audioOverlays.length > 0 && exportAudioPreset === EXPORT_AUDIO_PRESET_OFF)
       ? ',volume=0'
       : (Math.abs(sectionVolume - 1.0) > 0.0001 ? `,volume=${sectionVolume.toFixed(3)}` : '');
-    filterParts.push(`[${screenIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS${volumeFilter}[sa${i}]`);
+
+    const screenIdx = inputs.screenIdx;
+
+    if (screenIdx >= 0) {
+      filterParts.push(
+        `[${screenIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=fps=${targetFps},setsar=1[sv${i}]`
+      );
+      filterParts.push(`[${screenIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS${volumeFilter}[sa${i}]`);
+    } else if (wallpaperIdx >= 0) {
+      // Wallpaper/color base: generate video from the wallpaper input
+      filterParts.push(
+        `[${wallpaperIdx}:v]trim=duration=${duration},setpts=PTS-STARTPTS,fps=fps=${targetFps},scale=${sourceWidth}:${sourceHeight},setsar=1[sv${i}]`
+      );
+      // Generate silent audio for this section
+      filterParts.push(
+        `anullsrc=r=48000:cl=stereo,atrim=duration=${duration}${volumeFilter}[sa${i}]`
+      );
+    } else {
+      filterParts.push(
+        `[${screenIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=fps=${targetFps},setsar=1[sv${i}]`
+      );
+      filterParts.push(`[${screenIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS${volumeFilter}[sa${i}]`);
+    }
   }
 
   const screenLabels = sections.map((_, index) => `[sv${index}][sa${index}]`).join('');
@@ -437,6 +496,14 @@ async function renderComposite(
     }
   }
 
+  // When overlays exist in reel mode, build the screen+camera pipeline at landscape
+  // resolution (1920x1080) so overlays can be composited in full-canvas space before
+  // the reel crop is applied. Without overlays, use the normal reel pipeline.
+  const isReel = outputMode === 'reel';
+  const buildInLandscapeForOverlays = isReel && overlays.length > 0;
+  const pipelineMode = buildInLandscapeForOverlays ? 'landscape' as const : outputMode;
+  const pipelineCanvasW = buildInLandscapeForOverlays ? 1920 : canvasW;
+
   if (hasCamera) {
     for (let i = 0; i < sections.length; i += 1) {
       const section = sections[i]!;
@@ -445,8 +512,8 @@ async function renderComposite(
       if (cameraIdx >= 0) {
         filterParts.push(buildCameraTrimFilter(cameraIdx, section, targetFps, i, cameraSyncOffsetMs));
       } else {
-        const fallbackW = outputMode === 'reel' ? Math.round((sourceHeight * 9) / 16) : 1920;
-        const fallbackH = outputMode === 'reel' ? sourceHeight : 1080;
+        const fallbackW = pipelineMode === 'reel' ? Math.round((sourceHeight * 9) / 16) : 1920;
+        const fallbackH = pipelineMode === 'reel' ? sourceHeight : 1080;
         filterParts.push(`color=black:s=${fallbackW}x${fallbackH}:d=${duration}[cv${i}]`);
       }
     }
@@ -457,17 +524,34 @@ async function renderComposite(
     // Expand keyframes with auto-track mouse trail data
     const renderKeyframes = expandAutoTrackKeyframes(keyframes, sections, takeMap, deps);
 
+    // When building in landscape for overlays, remap PIP coordinates from reel
+    // canvas space (canvasW x canvasH) to landscape canvas space (pipelineCanvasW x canvasH)
+    // so the PIP lands at the correct position within the reel crop area.
+    const pipelineKeyframes = buildInLandscapeForOverlays
+      ? (() => {
+          const reelCanvasW = canvasW;
+          const cContentW = getContentWidth(sourceWidth, sourceHeight, screenFitMode, pipelineCanvasW, canvasH);
+          const cContentLeft = (pipelineCanvasW - cContentW) / 2;
+          const cMaxCropRange = Math.max(0, cContentW - reelCanvasW);
+          return renderKeyframes.map(kf => {
+            const cropOffset = cContentLeft + (((kf.reelCropX || 0) + 1) / 2) * cMaxCropRange;
+            const kfPipScale = Number.isFinite(Number(kf.pipScale)) ? Number(kf.pipScale) : 0.22;
+            return { ...kf, pipX: (kf.pipX || 0) + cropOffset, pipScale: kfPipScale * reelCanvasW / pipelineCanvasW };
+          });
+        })()
+      : renderKeyframes;
+
     const overlayFilter = buildFilterComplex(
-      renderKeyframes,
+      pipelineKeyframes,
       pipSize,
       screenFitMode,
       sourceWidth,
       sourceHeight,
-      canvasW,
+      pipelineCanvasW,
       canvasH,
       true,
       targetFps,
-      outputMode
+      pipelineMode
     );
     let adaptedOverlay = overlayFilter
       .replace(/\[0:v\]/g, '[screen_raw]')
@@ -481,6 +565,11 @@ async function renderComposite(
         '[screen_ovl][cam]overlay'
       );
     }
+    // In reel mode with overlays, the camera output needs to be [pre_reel_crop]
+    // instead of [out] so the reel crop can be applied after everything.
+    if (buildInLandscapeForOverlays) {
+      adaptedOverlay = adaptedOverlay.replace(/\[out\]$/, '[pre_reel_crop]');
+    }
     filterParts.push(adaptedOverlay);
   } else {
     const outputLabel = overlays.length > 0 ? '[screen]' : '[out]';
@@ -490,42 +579,85 @@ async function renderComposite(
       screenFitMode,
       sourceWidth,
       sourceHeight,
-      canvasW,
+      pipelineCanvasW,
       canvasH,
       outputLabel,
       true,
       targetFps,
-      outputMode
+      pipelineMode
     ).replace(/\[0:v\]/g, '[screen_raw]');
     filterParts.push(screenOnlyFilter);
   }
 
   // Overlay media filters (between screen/PIP and final output)
+  // Overlays are always positioned in the full 1920x1080 canvas space (landscape),
+  // independent of reel crop. In reel mode, overlays use landscape positions and the
+  // output is the full landscape resolution — the reel crop is applied afterwards.
   if (overlays.length > 0) {
-    const { outW, outH } = resolveOutputSize(sourceWidth, sourceHeight, outputMode);
+    const landscapeW = 1920;
+    const landscapeH = 1080;
+    const { outW: finalOutW, outH: finalOutH } = resolveOutputSize(sourceWidth, sourceHeight, outputMode);
+    const { outW: landOutW, outH: landOutH } = resolveOutputSize(sourceWidth, sourceHeight, 'landscape');
+    // Canvas is always 1920x1080; output dimensions match the pipeline frame
+    const overlayCanvasW = landscapeW;
+    const overlayCanvasH = landscapeH;
+    const overlayOutW = outputMode === 'reel' ? landOutW : finalOutW;
+    const overlayOutH = outputMode === 'reel' ? landOutH : finalOutH;
     // Count existing -i flags in args to determine input index offset
     let overlayInputOffset = 0;
     for (const a of args) { if (a === '-i') overlayInputOffset += 1; }
     const overlayResult = buildOverlayFilter(
-      overlays, canvasW, canvasH, outW, outH,
-      overlayInputOffset, 'screen', outputMode, totalDurationSec
+      overlays, overlayCanvasW, overlayCanvasH, overlayOutW, overlayOutH,
+      overlayInputOffset, 'screen', outputMode, totalDurationSec, targetFps
     );
     // Add overlay media inputs to args
     for (let i = 0; i < overlayResult.inputs.length; i++) {
       const inputArgs = overlayResult.inputs[i]!;
       const overlay = overlays[i]!;
-      const mediaAbsPath = path.join(outputFolder, overlay.mediaPath);
+      // Use the original media for the final render (proxy is for preview only)
+      const rawPath = overlay.mediaPath;
+      const mediaAbsPath = path.isAbsolute(rawPath) ? rawPath : path.join(outputFolder, rawPath);
       args.push(...inputArgs, mediaAbsPath);
     }
     // Append overlay filter parts
     for (const part of overlayResult.filterParts) {
       filterParts.push(part);
     }
-    // Rename final overlay label: [screen_ovl] if PIP follows, [out] if no camera
-    const finalOvlLabel = hasCamera ? '[screen_ovl]' : '[out]';
+    // Rename final overlay label:
+    // - hasCamera: [screen_ovl] (feeds into camera overlay)
+    // - no camera + reel overlays: [pre_reel_crop] (feeds into reel crop step)
+    // - no camera + landscape: [out] (final output)
+    const finalOvlLabel = hasCamera ? '[screen_ovl]' : (buildInLandscapeForOverlays ? '[pre_reel_crop]' : '[out]');
     const lastIdx = filterParts.length - 1;
     if (lastIdx >= 0) {
       filterParts[lastIdx] = filterParts[lastIdx]!.replace(/\[ovl_\d+\]$/, finalOvlLabel);
+    }
+
+  }
+
+  // In reel mode with overlays, apply the reel crop AFTER overlay+PIP compositing.
+  // The pipeline frame is at landscape resolution (resolveOutputSize in 'landscape' mode),
+  // so the reel crop dimensions must fit within that frame — not the raw source dimensions.
+  if (buildInLandscapeForOverlays) {
+    const { outW: landW, outH: landH } = resolveOutputSize(sourceWidth, sourceHeight, 'landscape');
+    let reelH = landH;
+    if (reelH % 2 !== 0) reelH -= 1;
+    let reelW = Math.round((reelH * 9) / 16);
+    if (reelW % 2 !== 0) reelW -= 1;
+    const landscapeContentW = getContentWidth(sourceWidth, sourceHeight, screenFitMode, landW, landH);
+    const contentLeft = Math.round((landW - landscapeContentW) / 2);
+    const maxCropRange = Math.max(0, Math.round(landscapeContentW) - reelW);
+    const cropXVal = keyframes.length > 0 && Number.isFinite(keyframes[0]!.reelCropX) ? keyframes[0]!.reelCropX : 0;
+    const hasAnimatedCrop = keyframes.length > 1 && keyframes.some((kf, i) => {
+      if (i === 0) return false;
+      return Math.abs((kf.reelCropX || 0) - (keyframes[i - 1]!.reelCropX || 0)) > 0.0001;
+    });
+    if (hasAnimatedCrop) {
+      const cropXExpr = buildNumericExpr(keyframes.map(kf => ({ ...kf, reelCropX: kf.reelCropX || 0 })), 'reelCropX', 3, 0, 't');
+      filterParts.push(`[pre_reel_crop]crop=${reelW}:${reelH}:'max(0,min(${landW - reelW},${contentLeft}+(${cropXExpr}+1)/2*${maxCropRange}))':0,setsar=1[out]`);
+    } else {
+      const cropX = Math.max(0, Math.min(landW - reelW, contentLeft + Math.round(((cropXVal || 0) + 1) / 2 * maxCropRange)));
+      filterParts.push(`[pre_reel_crop]crop=${reelW}:${reelH}:${cropX}:0,setsar=1[out]`);
     }
   }
 

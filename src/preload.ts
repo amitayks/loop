@@ -67,7 +67,8 @@ const api: ElectronAPI = {
     ipcRenderer.on('proxy:progress', handler);
     return () => ipcRenderer.removeListener('proxy:progress', handler);
   },
-  captureThumbnail: (opts) => ipcRenderer.invoke('capture-thumbnail', opts)
+  captureThumbnail: (opts) => ipcRenderer.invoke('capture-thumbnail', opts),
+  pickBackgroundImage: () => ipcRenderer.invoke('pick-background-image')
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);

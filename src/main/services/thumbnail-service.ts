@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 
 import { buildFilterComplex, buildScreenFilter, buildOverlayFilter, resolveOutputSize } from './render-filter-service.js';
@@ -34,19 +35,32 @@ async function captureThumbnail(
   const now = typeof deps.now === 'function' ? deps.now : Date.now;
 
   if (!projectFolder) throw new Error('Missing project folder');
+
+  // Fast path: canvas data URL from the renderer
+  const canvasDataUrl = typeof opts.canvasDataUrl === 'string' ? opts.canvasDataUrl : '';
+  if (canvasDataUrl) {
+    const outputPath = path.join(projectFolder, `thumbnail-${now()}-${outputMode}.png`);
+    const base64Data = canvasDataUrl.replace(/^data:image\/png;base64,/, '');
+    fs.writeFileSync(outputPath, Buffer.from(base64Data, 'base64'));
+    return outputPath;
+  }
+
   if (!ffmpegPath) throw new Error('ffmpeg-static is unavailable on this platform');
 
   const take = takes.find(t => t && t.screenPath);
-  if (!take || !take.screenPath) throw new Error('No take with screen path found');
 
-  const screenPath = take.screenPath;
-  const hasCamera = keyframes.some(kf => kf.pipVisible || kf.cameraFullscreen);
-  const cameraPath = hasCamera && take.cameraPath ? take.cameraPath : null;
+  if (!take) throw new Error('No take with screen path found');
 
   const canvasH = 1080;
-  const canvasW = outputMode === 'reel' ? Math.round(canvasH * 9 / 16) : 1920;
 
   const outputPath = path.join(projectFolder, `thumbnail-${now()}-${outputMode}.png`);
+
+  // ── Standard screen mode ─────────────────────────────────────────
+  const screenPath = take!.screenPath!;
+  const hasCamera = keyframes.some(kf => kf.pipVisible || kf.cameraFullscreen);
+  const cameraPath = hasCamera && take!.cameraPath ? take!.cameraPath : null;
+
+  const canvasW = outputMode === 'reel' ? Math.round(canvasH * 9 / 16) : 1920;
 
   const args: string[] = [];
 

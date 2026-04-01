@@ -52,6 +52,7 @@ export {
   MAX_OVERLAY_TRACKS,
   MAX_AUDIO_TRACKS,
   DEFAULT_AUDIO_VOLUME,
+  OVERLAY_TRACK_COLORS,
   AUDIO_OVERLAY_EXTENSIONS,
   EXPORT_AUDIO_PRESET_OFF,
   EXPORT_AUDIO_PRESET_COMPRESSED,
@@ -111,6 +112,7 @@ export function generateAudioOverlayId(): string {
   audioOverlayIdCounter += 1;
   return `audio-overlay-${Date.now()}-${audioOverlayIdCounter}`;
 }
+
 
 export function normalizeAudioVolume(value: unknown): number {
   if (value === null || value === undefined) return DEFAULT_AUDIO_VOLUME;
@@ -310,12 +312,12 @@ export function normalizeOverlays(rawOverlays: unknown): Overlay[] {
       const startTime = Math.max(0, Number(overlay.startTime));
       const endTime = Math.max(startTime + 0.001, Number(overlay.endTime));
       const duration = endTime - startTime;
-      const isVideo = overlay.mediaType === 'video';
-      let sourceStart = isVideo && Number.isFinite(Number(overlay.sourceStart)) ? Math.max(0, Number(overlay.sourceStart)) : 0;
-      let sourceEnd = isVideo && Number.isFinite(Number(overlay.sourceEnd)) && Number(overlay.sourceEnd) > sourceStart
+      const isVideoLike = overlay.mediaType === 'video' || overlay.mediaType === 'window';
+      let sourceStart = isVideoLike && Number.isFinite(Number(overlay.sourceStart)) ? Math.max(0, Number(overlay.sourceStart)) : 0;
+      let sourceEnd = isVideoLike && Number.isFinite(Number(overlay.sourceEnd)) && Number(overlay.sourceEnd) > sourceStart
         ? Number(overlay.sourceEnd)
         : sourceStart + duration;
-      if (!isVideo) {
+      if (!isVideoLike) {
         sourceStart = 0;
         sourceEnd = duration;
       }
@@ -323,7 +325,7 @@ export function normalizeOverlays(rawOverlays: unknown): Overlay[] {
       const trackIndex = Number.isFinite(rawTrack) && rawTrack >= 0
         ? Math.min(Math.floor(rawTrack), MAX_OVERLAY_TRACKS - 1)
         : 0;
-      return {
+      const result: Overlay = {
         id: overlay.id as string,
         trackIndex,
         mediaPath: overlay.mediaPath as string,
@@ -336,6 +338,11 @@ export function normalizeOverlays(rawOverlays: unknown): Overlay[] {
         reel: normalizeOverlayPosition(overlay.reel),
         saved: !!overlay.saved
       };
+      if (typeof overlay.sourceName === 'string') result.sourceName = overlay.sourceName;
+      if (Number.isFinite(Number(overlay.sourceWidth)) && Number(overlay.sourceWidth) > 0) result.sourceWidth = Number(overlay.sourceWidth);
+      if (Number.isFinite(Number(overlay.sourceHeight)) && Number(overlay.sourceHeight) > 0) result.sourceHeight = Number(overlay.sourceHeight);
+      if (typeof overlay.proxyPath === 'string' && overlay.proxyPath) result.proxyPath = overlay.proxyPath as string;
+      return result;
     });
 
   // Group by trackIndex, enforce no-overlap within each track
@@ -352,7 +359,7 @@ export function normalizeOverlays(rawOverlays: unknown): Overlay[] {
       if (group[i]!.startTime < prev.endTime) {
         const shift = prev.endTime - group[i]!.startTime;
         group[i]!.startTime = prev.endTime;
-        if (group[i]!.mediaType === 'video') {
+        if (group[i]!.mediaType === 'video' || group[i]!.mediaType === 'window') {
           group[i]!.sourceStart += shift;
         }
       }
@@ -436,6 +443,30 @@ export function normalizeAudioOverlays(rawAudioOverlays: unknown): AudioOverlay[
   return result;
 }
 
+export function normalizeWindowPaths(rawPaths: unknown, projectFolder?: string): Array<{ name: string; path: string; width?: number; height?: number; proxyPath?: string | null }> | null {
+  if (!Array.isArray(rawPaths)) return null;
+  const valid = (rawPaths as RawRecord[])
+    .filter((wp): wp is RawRecord =>
+      wp && typeof wp === 'object' &&
+      typeof wp.name === 'string' &&
+      typeof wp.path === 'string' && !!wp.path
+    )
+    .map((wp) => {
+      const rawPath = wp.path as string;
+      const entry: { name: string; path: string; width?: number; height?: number; proxyPath?: string | null } = {
+        name: wp.name as string,
+        path: projectFolder ? (toProjectAbsolutePath(projectFolder, rawPath) ?? rawPath) : rawPath
+      };
+      if (Number.isFinite(Number(wp.width)) && Number(wp.width) > 0) entry.width = Number(wp.width);
+      if (Number.isFinite(Number(wp.height)) && Number(wp.height) > 0) entry.height = Number(wp.height);
+      if (typeof wp.proxyPath === 'string' && wp.proxyPath) {
+        entry.proxyPath = projectFolder ? toProjectAbsolutePath(projectFolder, wp.proxyPath as string) : wp.proxyPath as string;
+      }
+      return entry;
+    });
+  return valid.length > 0 ? valid : null;
+}
+
 export function createDefaultProject(name = 'Untitled Project'): Project {
   const now = new Date().toISOString();
   return {
@@ -464,7 +495,8 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
       overlays: [],
       savedOverlays: [],
       audioOverlays: [],
-      savedAudioOverlays: []
+      savedAudioOverlays: [],
+      backgroundImagePath: null
     }
   };
 }
@@ -510,6 +542,7 @@ export function normalizeProjectData(rawProject: unknown, projectFolder?: string
       proxyPath: projectFolder
         ? toProjectAbsolutePath(projectFolder, take?.proxyPath)
         : (take?.proxyPath as string) || null,
+      windowPaths: normalizeWindowPaths(take?.windowPaths, projectFolder),
       sections: normalizeSections(take?.sections)
     })),
     timeline: {
@@ -529,7 +562,8 @@ export function normalizeProjectData(rawProject: unknown, projectFolder?: string
       overlays: normalizeOverlays(rawTimeline.overlays),
       savedOverlays: normalizeOverlays(rawTimeline.savedOverlays),
       audioOverlays: normalizeAudioOverlays(rawTimeline.audioOverlays),
-      savedAudioOverlays: normalizeAudioOverlays(rawTimeline.savedAudioOverlays)
+      savedAudioOverlays: normalizeAudioOverlays(rawTimeline.savedAudioOverlays),
+      backgroundImagePath: typeof rawTimeline.backgroundImagePath === 'string' ? rawTimeline.backgroundImagePath : null
     } as ProjectTimeline
   };
 }

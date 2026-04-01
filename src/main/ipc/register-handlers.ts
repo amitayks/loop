@@ -228,6 +228,20 @@ export function registerIpcHandlers({
     return captureThumbnail(opts);
   });
 
+  ipcMain.handle('pick-background-image', async () => {
+    try {
+      const result = await dialog.showOpenDialog({
+        title: 'Choose Background Image',
+        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
+        properties: ['openFile']
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return result.filePaths[0]!;
+    } catch (_error) {
+      return null;
+    }
+  });
+
   ipcMain.handle('get-scribe-token', async () => {
     try {
       return await getScribeToken();

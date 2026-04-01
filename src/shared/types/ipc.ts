@@ -59,4 +59,5 @@ export interface ElectronAPI {
   generateProxy(opts: ProxyGenerateOptions): Promise<string | null>;
   onProxyProgress(listener: (update: ProxyProgressEvent) => void): () => void;
   captureThumbnail(opts: ThumbnailCaptureOptions): Promise<string>;
+  pickBackgroundImage(): Promise<string | null>;
 }

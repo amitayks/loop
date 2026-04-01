@@ -477,7 +477,7 @@ describe('main/services/thumbnail-service', () => {
           makeBaseOpts({ takes: [{ id: 'take-1', screenPath: null }] }),
           makeBaseDeps()
         )
-      ).rejects.toThrow(/No take with screen path/);
+      ).rejects.toThrow(/No take with screen path found/);
     });
 
     test('throws for missing ffmpeg', async () => {

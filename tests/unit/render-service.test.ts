@@ -596,6 +596,49 @@ describe('main/services/render-service', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  test('renderComposite reel mode uses overlay.reel positions not overlay.landscape', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-reel-ovl-pos-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    fs.writeFileSync(path.join(overlayDir, 'img.png'), 'fake', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 10 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false, reelCropX: 0 }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        screenFitMode: 'fill',
+        outputMode: 'reel',
+        overlays: [{
+          id: 'o1', mediaPath: 'overlay-media/img.png', mediaType: 'image',
+          startTime: 2, endTime: 7, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 200, y: 100, width: 400, height: 300 },
+          reel: { x: 700, y: 150, width: 350, height: 250 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 952,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => { execCalls.push(args); }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // Should use reel positions (700, 150 at 350x250), not landscape (200, 100 at 400x300)
+    expect(argsStr).toContain('scale=350:250');
+    expect(argsStr).toContain("x='700'");
+    expect(argsStr).toContain("y='150'");
+    // Should NOT use landscape dimensions
+    expect(argsStr).not.toContain('scale=400:300');
+  });
+
   test('renderComposite includes multi-track overlay media in correct order', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-multitrack-'));
     const screenPath = path.join(tmpDir, 'screen.webm');
@@ -834,5 +877,365 @@ describe('main/services/render-service', () => {
     expect(argString).toContain('-map [audio_final]');
     expect(argString).not.toContain('amix');
     expect(argString).not.toContain('screen_audio');
+  });
+
+  test('renderComposite uses wallpaper base when window overlays present and no screen path', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-wallpaper-'));
+    const outputDir = path.join(tmpDir, 'out');
+    const wallpaperPath = path.join(tmpDir, 'wallpaper.png');
+    const windowMediaPath = path.join(tmpDir, 'window-capture.mp4');
+    fs.writeFileSync(wallpaperPath, 'wallpaper', 'utf8');
+    fs.writeFileSync(windowMediaPath, 'window-video', 'utf8');
+
+    const execCalls: Array<{ bin: string; args: string[] }> = [];
+    await renderComposite(
+      {
+        outputFolder: outputDir,
+        takes: [{ id: 'take-1', screenPath: null, cameraPath: null }],
+        sections: [{ takeId: 'take-1', sourceStart: 0, sourceEnd: 5 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        wallpaperPath,
+        overlays: [{
+          id: 'w1', mediaPath: windowMediaPath, mediaType: 'window',
+          startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 100, y: 100, width: 800, height: 600 },
+          reel: { x: 50, y: 50, width: 400, height: 300 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 900,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { ffmpegPath: string; args: string[] }) => {
+          execCalls.push({ bin: '', args });
+        }
+      }
+    );
+
+    const argString = execCalls[0]!.args.join(' ');
+    // Should use wallpaper as looped input for the base
+    expect(argString).toContain('-loop 1');
+    expect(argString).toContain(wallpaperPath);
+    // Should still produce valid output
+    expect(argString).toContain('-map [out]');
+  });
+
+  test('renderComposite uses color fallback when window overlays present and no wallpaper', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-color-fb-'));
+    const outputDir = path.join(tmpDir, 'out');
+    const windowMediaPath = path.join(tmpDir, 'window-capture.mp4');
+    fs.writeFileSync(windowMediaPath, 'window-video', 'utf8');
+
+    const execCalls: Array<{ bin: string; args: string[] }> = [];
+    await renderComposite(
+      {
+        outputFolder: outputDir,
+        takes: [{ id: 'take-1', screenPath: null, cameraPath: null }],
+        sections: [{ takeId: 'take-1', sourceStart: 0, sourceEnd: 5 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        overlays: [{
+          id: 'w1', mediaPath: windowMediaPath, mediaType: 'window',
+          startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 100, y: 100, width: 800, height: 600 },
+          reel: { x: 50, y: 50, width: 400, height: 300 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 901,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { ffmpegPath: string; args: string[] }) => {
+          execCalls.push({ bin: '', args });
+        }
+      }
+    );
+
+    const argString = execCalls[0]!.args.join(' ');
+    // Should use color source as fallback
+    expect(argString).toContain('color=c=0x1E1E1E');
+    expect(argString).toContain('-map [out]');
+  });
+
+  test('renderComposite resolves absolute overlay mediaPath without joining outputFolder', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-abspath-'));
+    const outputDir = path.join(tmpDir, 'out');
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    const absMediaPath = path.join(tmpDir, 'absolute-overlay.mp4');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    fs.writeFileSync(absMediaPath, 'overlay-data', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: outputDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 5 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        overlays: [{
+          id: 'o1', mediaPath: absMediaPath, mediaType: 'window',
+          startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 100, y: 100, width: 400, height: 300 },
+          reel: { x: 50, y: 50, width: 200, height: 150 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 902,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => {
+          execCalls.push(args);
+        }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // The absolute path should appear directly, NOT joined with outputFolder
+    expect(argsStr).toContain(absMediaPath);
+    expect(argsStr).not.toContain(path.join(outputDir, absMediaPath));
+  });
+
+  test('renderComposite reel + overlay remaps PIP position to landscape space', async () => {
+    // When reel mode has overlays, pipeline runs in landscape. PIP coordinates
+    // (stored in reel canvas space 608x1080) must be remapped to landscape canvas (1920x1080).
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-reel-pip-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    const cameraPath = path.join(tmpDir, 'camera.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    fs.writeFileSync(cameraPath, 'camera', 'utf8');
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    fs.writeFileSync(path.join(overlayDir, 'img.jpg'), 'fake', 'utf8');
+
+    // PIP at bottom-right snap: pipX=454, pipY=926 (reel canvas 608x1080, pipSize=134)
+    const REEL_W = 608;
+    const PIP_SCALE = 0.22;
+    const PIP_MARGIN = 20;
+    const pipSizeCanvas = Math.round(REEL_W * PIP_SCALE); // 134
+    const pipX = REEL_W - pipSizeCanvas - PIP_MARGIN; // 454
+    const pipY = 1080 - pipSizeCanvas - PIP_MARGIN; // 926
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 'take-1', screenPath, cameraPath }],
+        sections: [{ takeId: 'take-1', sourceStart: 0, sourceEnd: 10 }],
+        keyframes: [{
+          time: 0, pipX, pipY, pipVisible: true, cameraFullscreen: false,
+          reelCropX: 0, pipScale: PIP_SCALE, pipSnapPoint: 'br'
+        }],
+        pipSize: pipSizeCanvas,
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        screenFitMode: 'fill',
+        outputMode: 'reel',
+        overlays: [{
+          id: 'o1', mediaPath: 'overlay-media/img.jpg', mediaType: 'image',
+          startTime: 2, endTime: 7, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 200, y: 100, width: 400, height: 300 },
+          reel: { x: 50, y: 50, width: 200, height: 150 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 951,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => {
+          execCalls.push(args);
+        }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // PIP should be sized relative to reel width, not landscape width
+    // adjustedPipScale = 0.22 * 608/1920 ≈ 0.0697 → round(1920 * 0.0697) = 134
+    expect(argsStr).toContain('scale=134:134');
+    // PIP should NOT be sized at landscape scale (round(1920*0.22) = 422)
+    expect(argsStr).not.toContain('scale=422:422');
+    // PIP x-position should include the crop offset (656 for centered reelCropX=0)
+    // pipX_landscape = 454 + 656 = 1110
+    expect(argsStr).toContain("overlay=x='1110':y='926'");
+  });
+
+  test('renderComposite reel + overlay on tall source uses landscape-bounded crop', async () => {
+    // Source 3024x1964 is taller than 16:9 → landscape pipeline produces 3024x1700
+    // Reel crop must not exceed the landscape height (1700), not use source height (1964)
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-reel-tall-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    const imgPath = path.join(overlayDir, 'test.jpg');
+    fs.writeFileSync(imgPath, 'fake-jpg', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 'take-1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 'take-1', sourceStart: 0, sourceEnd: 10 }],
+        keyframes: [{ time: 0, pipX: 10, pipY: 10, pipVisible: false, cameraFullscreen: false, reelCropX: 0 }],
+        pipSize: 300,
+        sourceWidth: 3024,
+        sourceHeight: 1964,
+        screenFitMode: 'fill',
+        outputMode: 'reel',
+        overlays: [{
+          id: 'o1', mediaPath: 'overlay-media/test.jpg', mediaType: 'image',
+          startTime: 2, endTime: 7, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 200, y: 100, width: 400, height: 300 },
+          reel: { x: 50, y: 50, width: 200, height: 150 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 950,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => {
+          execCalls.push(args);
+        }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // Landscape pipeline: resolveOutputSize(3024,1964,'landscape') → 3024x1700
+    // Reel crop from landscape: reelH=1700, reelW=round(1700*9/16)=956
+    expect(argsStr).toContain('crop=956:1700:');
+    // Must NOT try to crop at source height (would exceed pipeline frame)
+    expect(argsStr).not.toContain('crop=1104:1964:');
+    expect(argsStr).toContain('[pre_reel_crop]');
+    expect(argsStr).toContain('[out]');
+  });
+
+  test('renderComposite clamps overlay duration to timeline length', async () => {
+    // Timeline is 30s (one section 0-30), but overlay spans 0-60s.
+    // The overlay should be clamped to 30s so the output isn't extended.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-ovl-clamp-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    fs.writeFileSync(path.join(overlayDir, 'img.png'), 'fake', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 30 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        screenFitMode: 'fill',
+        overlays: [{
+          id: 'o1', mediaPath: 'overlay-media/img.png', mediaType: 'image',
+          startTime: 0, endTime: 60, sourceStart: 0, sourceEnd: 60,
+          landscape: { x: 100, y: 100, width: 400, height: 300 },
+          reel: { x: 100, y: 100, width: 400, height: 300 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 960,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => { execCalls.push(args); }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // Image input should be limited to 30s, not 60s
+    expect(argsStr).toContain('-loop 1 -t 30.000');
+    expect(argsStr).not.toContain('-t 60.000');
+    // Enable window should end at 30s, not 60s
+    expect(argsStr).toContain("enable='between(t,0.000,30.000)'");
+    expect(argsStr).not.toContain('between(t,0.000,60.000)');
+  });
+
+  test('renderComposite excludes overlays that start after timeline end', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-ovl-excl-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    fs.writeFileSync(path.join(overlayDir, 'img.png'), 'fake', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 20 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        screenFitMode: 'fill',
+        overlays: [{
+          id: 'o1', mediaPath: 'overlay-media/img.png', mediaType: 'image',
+          startTime: 25, endTime: 40, sourceStart: 0, sourceEnd: 15,
+          landscape: { x: 100, y: 100, width: 400, height: 300 },
+          reel: { x: 100, y: 100, width: 400, height: 300 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 961,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => { execCalls.push(args); }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // Overlay starts at 25s but timeline is only 20s — should be excluded entirely
+    expect(argsStr).not.toContain('img.png');
+    expect(argsStr).not.toContain('ovl_prep');
+  });
+
+  test('renderComposite uses original mediaPath not proxyPath for final render', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-proxy-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    const mediaFile = path.join(tmpDir, 'overlay-media', 'capture.mp4');
+    const proxyFile = path.join(tmpDir, 'overlay-media', 'capture-proxy.mp4');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    fs.mkdirSync(path.join(tmpDir, 'overlay-media'), { recursive: true });
+    fs.writeFileSync(mediaFile, 'original', 'utf8');
+    fs.writeFileSync(proxyFile, 'proxy', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 5 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        overlays: [{
+          id: 'o1', mediaPath: mediaFile, mediaType: 'window',
+          proxyPath: proxyFile,
+          startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+          landscape: { x: 100, y: 100, width: 400, height: 300 },
+          reel: { x: 50, y: 50, width: 200, height: 150 }
+        }]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 903,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => {
+          execCalls.push(args);
+        }
+      }
+    );
+
+    const argsStr = execCalls[0]!.join(' ');
+    // Final render should use the original media, not the proxy
+    expect(argsStr).toContain(mediaFile);
+    expect(argsStr).not.toContain(proxyFile);
   });
 });

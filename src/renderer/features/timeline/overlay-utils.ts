@@ -85,7 +85,8 @@ function getOverlayStateAtTime(
       }
     }
 
-    const sourceTime = o.mediaType === 'video' ? o.sourceStart + (time - o.startTime) : 0;
+    const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
+    const sourceTime = isVideoLike ? o.sourceStart + (time - o.startTime) : 0;
 
     return {
       active: true,

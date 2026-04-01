@@ -17,7 +17,8 @@ import {
   normalizePipSnapPoint,
   generateOverlayId,
   normalizeOverlayPosition,
-  normalizeOverlays
+  normalizeOverlays,
+  normalizeWindowPaths
 } from '../../src/shared/domain/project.js';
 
 describe('shared/domain/project', () => {
@@ -473,6 +474,7 @@ describe('shared/domain/project', () => {
   });
 
   test('normalizeOverlays clamps trackIndex to valid range', () => {
+    // MAX_OVERLAY_TRACKS is 4, so valid range is 0-3
     const result = normalizeOverlays([
       { id: 'o1', mediaPath: 'img.png', mediaType: 'image', startTime: 0, endTime: 5, trackIndex: 5 },
       { id: 'o2', mediaPath: 'img2.png', mediaType: 'image', startTime: 6, endTime: 10, trackIndex: -1 }
@@ -480,7 +482,7 @@ describe('shared/domain/project', () => {
     const o2 = result.find(o => o.id === 'o2');
     const o1 = result.find(o => o.id === 'o1');
     expect(o2!.trackIndex).toBe(0);
-    expect(o1!.trackIndex).toBe(1);
+    expect(o1!.trackIndex).toBe(3); // clamped to MAX_OVERLAY_TRACKS - 1
   });
 
   test('normalizeOverlays enforces no-overlap per track, not globally', () => {
@@ -514,6 +516,58 @@ describe('shared/domain/project', () => {
     expect(result[0]!.id).toBe('b');
     expect(result[1]!.id).toBe('a');
     expect(result[2]!.id).toBe('c');
+  });
+
+  test('normalizeOverlays accepts window mediaType', () => {
+    const result = normalizeOverlays([
+      { id: 'w1', mediaPath: '/abs/win0.webm', mediaType: 'window', startTime: 0, endTime: 10, trackIndex: 0,
+        sourceName: 'Chrome', sourceWidth: 1920, sourceHeight: 1080 }
+    ]);
+    expect(result.length).toBe(1);
+    expect(result[0]!.mediaType).toBe('window');
+    expect(result[0]!.sourceName).toBe('Chrome');
+    expect(result[0]!.sourceWidth).toBe(1920);
+    expect(result[0]!.sourceHeight).toBe(1080);
+  });
+
+  test('normalizeOverlays preserves window metadata fields', () => {
+    const result = normalizeOverlays([
+      { id: 'w1', mediaPath: '/abs/win0.webm', mediaType: 'window', startTime: 0, endTime: 10,
+        sourceName: 'Firefox', sourceWidth: 1440, sourceHeight: 900, proxyPath: '/abs/proxy.mp4' }
+    ]);
+    expect(result[0]!.sourceName).toBe('Firefox');
+    expect(result[0]!.sourceWidth).toBe(1440);
+    expect(result[0]!.sourceHeight).toBe(900);
+    expect(result[0]!.proxyPath).toBe('/abs/proxy.mp4');
+  });
+
+  test('normalizeOverlays treats window sourceStart/sourceEnd like video', () => {
+    const result = normalizeOverlays([
+      { id: 'w1', mediaPath: '/win.webm', mediaType: 'window', startTime: 2, endTime: 8,
+        sourceStart: 5, sourceEnd: 15 }
+    ]);
+    expect(result[0]!.sourceStart).toBe(5);
+    expect(result[0]!.sourceEnd).toBe(15);
+  });
+
+  test('normalizeOverlays adjusts window sourceStart on overlap fix', () => {
+    const result = normalizeOverlays([
+      { id: 'a', mediaPath: '/win.webm', mediaType: 'window', startTime: 0, endTime: 6, trackIndex: 0 },
+      { id: 'b', mediaPath: '/win2.webm', mediaType: 'window', startTime: 4, endTime: 10, trackIndex: 0,
+        sourceStart: 0, sourceEnd: 6 }
+    ]);
+    expect(result[1]!.startTime).toBe(6);
+    expect(result[1]!.sourceStart).toBe(2); // shifted by 2 (6-4)
+  });
+
+  test('normalizeOverlays validates trackIndex 0-3', () => {
+    const result = normalizeOverlays([
+      { id: 'w1', mediaPath: '/win.webm', mediaType: 'window', startTime: 0, endTime: 5, trackIndex: 0 },
+      { id: 'w2', mediaPath: '/win2.webm', mediaType: 'window', startTime: 0, endTime: 5, trackIndex: 1 },
+      { id: 'o1', mediaPath: 'img.png', mediaType: 'image', startTime: 0, endTime: 5, trackIndex: 2 },
+      { id: 'o2', mediaPath: 'img2.png', mediaType: 'image', startTime: 0, endTime: 5, trackIndex: 3 }
+    ]);
+    expect(result.map(o => o.trackIndex)).toEqual([0, 1, 2, 3]);
   });
 
   test('normalizeKeyframes includes autoTrack and autoTrackSmoothing', () => {
@@ -564,5 +618,61 @@ describe('shared/domain/project', () => {
       '/tmp/project'
     );
     expect(project.takes[0]!.proxyPath).toBe('/abs/path/screen-proxy.mp4');
+  });
+
+  test('normalizeWindowPaths converts relative paths to absolute when projectFolder provided', () => {
+    const result = normalizeWindowPaths(
+      [{ name: 'VS Code', path: 'win0.webm', proxyPath: 'win0-proxy.mp4' }],
+      '/tmp/project'
+    );
+    expect(result).toHaveLength(1);
+    expect(result![0]!.path).toBe('/tmp/project/win0.webm');
+    expect(result![0]!.proxyPath).toBe('/tmp/project/win0-proxy.mp4');
+  });
+
+  test('normalizeWindowPaths preserves absolute paths', () => {
+    const result = normalizeWindowPaths(
+      [{ name: 'VS Code', path: '/abs/win0.webm', proxyPath: '/abs/win0-proxy.mp4' }],
+      '/tmp/project'
+    );
+    expect(result![0]!.path).toBe('/abs/win0.webm');
+    expect(result![0]!.proxyPath).toBe('/abs/win0-proxy.mp4');
+  });
+
+  test('normalizeWindowPaths works without projectFolder (no conversion)', () => {
+    const result = normalizeWindowPaths(
+      [{ name: 'VS Code', path: 'win0.webm', proxyPath: 'win0-proxy.mp4' }]
+    );
+    expect(result![0]!.path).toBe('win0.webm');
+    expect(result![0]!.proxyPath).toBe('win0-proxy.mp4');
+  });
+
+  test('normalizeWindowPaths sets proxyPath to null/undefined when absent', () => {
+    const result = normalizeWindowPaths(
+      [{ name: 'VS Code', path: 'win0.webm' }],
+      '/tmp/project'
+    );
+    expect(result![0]!.path).toBe('/tmp/project/win0.webm');
+    expect(result![0]!.proxyPath).toBeUndefined();
+  });
+
+  test('normalizeProjectData resolves windowPaths to absolute paths', () => {
+    const project = normalizeProjectData(
+      {
+        takes: [{
+          id: 't1',
+          screenPath: 'screen.webm',
+          windowPaths: [
+            { name: 'Win0', path: 'win0.webm', proxyPath: 'win0-proxy.mp4' },
+            { name: 'Win1', path: 'win1.webm' }
+          ]
+        }]
+      },
+      '/tmp/project'
+    );
+    expect(project.takes[0]!.windowPaths).toHaveLength(2);
+    expect(project.takes[0]!.windowPaths![0]!.path).toBe('/tmp/project/win0.webm');
+    expect(project.takes[0]!.windowPaths![0]!.proxyPath).toBe('/tmp/project/win0-proxy.mp4');
+    expect(project.takes[0]!.windowPaths![1]!.path).toBe('/tmp/project/win1.webm');
   });
 });

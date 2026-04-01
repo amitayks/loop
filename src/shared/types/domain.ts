@@ -4,7 +4,7 @@ export type OutputMode = 'landscape' | 'reel';
 export type ExportAudioPreset = 'off' | 'compressed';
 export type ScreenFitMode = 'fit' | 'fill';
 export type PipSnapPoint = 'tl' | 'tc' | 'tr' | 'ml' | 'center' | 'mr' | 'bl' | 'bc' | 'br';
-export type OverlayMediaType = 'image' | 'video';
+export type OverlayMediaType = 'image' | 'video' | 'window';
 
 // ── Numeric constraint constants ─────────────────────────────────────
 
@@ -20,9 +20,10 @@ export const MAX_REEL_CROP_X = 1 as const;
 export const MIN_PIP_SCALE = 0.15 as const;
 export const MAX_PIP_SCALE = 0.50 as const;
 export const DEFAULT_PIP_SCALE = 0.22 as const;
-export const MAX_OVERLAY_TRACKS = 2 as const;
+export const MAX_OVERLAY_TRACKS = 4 as const;
 export const MAX_AUDIO_TRACKS = 1 as const;
 export const DEFAULT_AUDIO_VOLUME = 1.0 as const;
+export const OVERLAY_TRACK_COLORS = ['#3B82F6', '#22C55E', '#6366F1', '#6366F1'] as const;
 export const AUDIO_OVERLAY_EXTENSIONS = ['.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a'] as const;
 
 export const EXPORT_AUDIO_PRESET_OFF = 'off' as const;
@@ -32,7 +33,7 @@ export const OUTPUT_MODE_REEL = 'reel' as const;
 
 export const VALID_PIP_SNAP_POINTS = ['tl', 'tc', 'tr', 'ml', 'center', 'mr', 'bl', 'bc', 'br'] as const;
 export const DEFAULT_PIP_SNAP_POINT: PipSnapPoint = 'br';
-export const VALID_OVERLAY_MEDIA_TYPES = ['image', 'video'] as const;
+export const VALID_OVERLAY_MEDIA_TYPES = ['image', 'video', 'window'] as const;
 export const OVERLAY_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'] as const;
 export const OVERLAY_VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov'] as const;
 export const DEFAULT_OVERLAY_POSITION: OverlayPosition = { x: 0, y: 0, width: 400, height: 300 };
@@ -110,6 +111,10 @@ export interface Overlay {
   landscape: OverlayPosition;
   reel: OverlayPosition;
   saved: boolean;
+  sourceName?: string;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  proxyPath?: string;
 }
 
 export interface AudioOverlay {
@@ -132,6 +137,7 @@ export interface Take {
   cameraPath: string | null;
   mousePath: string | null;
   proxyPath: string | null;
+  windowPaths: Array<{ name: string; path: string; width?: number; height?: number; proxyPath?: string | null }> | null;
   sections: Section[];
 }
 
@@ -157,6 +163,7 @@ export interface ProjectTimeline {
   savedOverlays: Overlay[];
   audioOverlays: AudioOverlay[];
   savedAudioOverlays: AudioOverlay[];
+  backgroundImagePath: string | null;
 }
 
 export interface Project {
