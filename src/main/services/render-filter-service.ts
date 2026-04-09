@@ -527,6 +527,8 @@ export function buildOverlayFilter(
       prepParts.push(`trim=start=${o.sourceStart.toFixed(3)}:end=${o.sourceEnd.toFixed(3)}`);
       prepParts.push('setpts=PTS-STARTPTS');
       prepParts.push(`fps=fps=${targetFps}`);
+    } else if (o.mediaType === 'image') {
+      prepParts.push(`fps=fps=${targetFps}`);
     }
 
     // For size transitions, scale to the max of both sizes so geq has stable dimensions,
@@ -545,13 +547,17 @@ export function buildOverlayFilter(
       prepParts.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*lte(pow(max(0,max(${cornerR}-X,X-${maxX})),2)+pow(max(0,max(${cornerR}-Y,Y-${maxY})),2),${rSq})'`);
     }
 
-    // Animated size transition: interpolate from prev size to current during first FADE seconds
+    // Animated size transition: easeInOut from prev size to current during first FADE seconds.
     // Uses local time (t starts at 0, before PTS shift).
     // Use 2*round(.../2) to keep even dimensions (required by yuva420p).
     if (sizeTransition) {
       const f = FADE.toFixed(3);
-      const wExpr = `if(gte(t,${f}),${renderW},2*round((${prevRenderW}+(${renderW}-${prevRenderW})*t/${f})/2))`;
-      const hExpr = `if(gte(t,${f}),${renderH},2*round((${prevRenderH}+(${renderH}-${prevRenderH})*t/${f})/2))`;
+      // easeInOut: p < 0.5 ? 2*p*p : 1-pow(-2*p+2,2)/2
+      const p = `(t/${f})`;
+      const ease = `if(lt(${p},0.5),2*${p}*${p},1-pow(-2*${p}+2,2)/2)`;
+      const eased = `if(gte(t,${f}),1,${ease})`;
+      const wExpr = `2*round((${prevRenderW}+(${renderW}-${prevRenderW})*${eased})/2)`;
+      const hExpr = `2*round((${prevRenderH}+(${renderH}-${prevRenderH})*${eased})/2)`;
       prepParts.push(`scale=w='${wExpr}':h='${hExpr}':eval=frame`);
     }
 
@@ -587,14 +593,18 @@ export function buildOverlayFilter(
       const prevRenderX = Math.round(prevPos.x * scaleX);
       const prevRenderY = Math.round(prevPos.y * scaleY);
       if (prevRenderX !== renderX || prevRenderY !== renderY || sizeTransition) {
-        // Animate from prev position to current during first FADE seconds of this segment
+        // Animate from prev position to current using easeInOut during first FADE seconds
         const tStart = o.startTime.toFixed(3);
         const tEnd = (o.startTime + FADE).toFixed(3);
+        // easeInOut: p < 0.5 ? 2*p*p : 1-pow(-2*p+2,2)/2
+        const p = `((t-${tStart})/${FADE.toFixed(3)})`;
+        const ease = `if(lt(${p},0.5),2*${p}*${p},1-pow(-2*${p}+2,2)/2)`;
+        const eased = `if(gte(t,${tEnd}),1,${ease})`;
         xExpr = prevRenderX !== renderX
-          ? `if(gte(t,${tEnd}),${renderX},${prevRenderX}+(${renderX}-${prevRenderX})*(t-${tStart})/${FADE.toFixed(3)})`
+          ? `${prevRenderX}+(${renderX}-${prevRenderX})*${eased}`
           : String(renderX);
         yExpr = prevRenderY !== renderY
-          ? `if(gte(t,${tEnd}),${renderY},${prevRenderY}+(${renderY}-${prevRenderY})*(t-${tStart})/${FADE.toFixed(3)})`
+          ? `${prevRenderY}+(${renderY}-${prevRenderY})*${eased}`
           : String(renderY);
         useEvalFrame = true;
       }

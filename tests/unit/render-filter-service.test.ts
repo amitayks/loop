@@ -676,7 +676,8 @@ describe('main/services/render-filter-service', () => {
     const secondPrep = result.filterParts[2]!;
     // Second segment: geq at max size (600x400), then animated scale from 400x300 to 600x400
     expect(secondPrep).toContain('scale=600:400');
-    expect(secondPrep).toContain("scale=w='if(gte(t,0.300),600,2*round((400");
+    // easeInOut size transition: 2*round((prevW+(W-prevW)*eased)/2)
+    expect(secondPrep).toContain("scale=w='2*round((400+(600-400)*if(gte(t,0.300),1,");
     expect(secondPrep).toContain('eval=frame');
     // Overlay position should also animate
     const secondOverlay = result.filterParts[3]!;
