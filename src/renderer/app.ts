@@ -23,9 +23,10 @@ import {
   resolveCameraPlaybackTargetTime
 } from './features/timeline/camera-sync.js';
 import {
-  getOverlayStateAtTime as _getOverlayStateAtTime
+  getOverlayStateAtTime as _getOverlayStateAtTime,
+  applyOverlayTrimDelta as _applyOverlayTrimDelta
 } from './features/timeline/overlay-utils.js';
-import type { OverlayState } from './features/timeline/overlay-utils.js';
+import type { OverlayState, OverlayTrimSnapshot, OverlayTrimContext } from './features/timeline/overlay-utils.js';
 import {
   lookupSmoothedMouseAt
 } from './features/timeline/mouse-trail.js';
@@ -130,6 +131,8 @@ interface TrimDragState {
   originalEnd: number;
   startMouseX: number;
   pixelsPerSecond: number;
+  overlaySnapshots: OverlayTrimSnapshot[];
+  audioOverlaySnapshots: OverlayTrimSnapshot[];
 }
 
 interface BackgroundDragState {
@@ -3174,6 +3177,42 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       editorPause();
       e.preventDefault();
       const rect = editorTimeline.getBoundingClientRect();
+      const epsilon = 0.05;
+
+      // Snapshot all overlays that overlap with the section's trimmed edge.
+      // We capture broadly because shortening cuts ANY overlay in the way,
+      // while extending only affects edge-aligned overlays (decided in finishTrimDrag).
+      // Snapshot overlays that actually extend INTO the section (not just touching the boundary).
+      // For right edge: overlay must start before section.end and end after section.start (inside the section)
+      // For left edge: overlay must end after section.start and start before section.end (inside the section)
+      const overlaySnapshots: OverlayTrimSnapshot[] = [];
+      for (const o of editorState!.overlays) {
+        const insideSection = o.startTime < section.end - epsilon && o.endTime > section.start + epsilon;
+        if (insideSection) {
+          overlaySnapshots.push({
+            id: o.id,
+            originalStartTime: o.startTime,
+            originalEndTime: o.endTime,
+            originalSourceStart: o.sourceStart,
+            originalSourceEnd: o.sourceEnd
+          });
+        }
+      }
+
+      const audioOverlaySnapshots: OverlayTrimSnapshot[] = [];
+      for (const ao of editorState!.audioOverlays) {
+        const insideSection = ao.startTime < section.end - epsilon && ao.endTime > section.start + epsilon;
+        if (insideSection) {
+          audioOverlaySnapshots.push({
+            id: ao.id,
+            originalStartTime: ao.startTime,
+            originalEndTime: ao.endTime,
+            originalSourceStart: ao.sourceStart,
+            originalSourceEnd: ao.sourceEnd
+          });
+        }
+      }
+
       trimDragState = {
         sectionId,
         edge,
@@ -3182,7 +3221,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         originalStart: section.start,
         originalEnd: section.end,
         startMouseX: e.clientX,
-        pixelsPerSecond: rect.width / editorState!.duration
+        pixelsPerSecond: rect.width / editorState!.duration,
+        overlaySnapshots,
+        audioOverlaySnapshots
       };
       document.body.style.cursor = 'col-resize';
       const onMove = (e2: MouseEvent) => { e2.preventDefault(); updateTrimDrag(e2); };
@@ -3233,11 +3274,65 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       if (!section) { trimDragState = null; return; }
       const sourceStartChanged = Math.abs(section.sourceStart - trimDragState.originalSourceStart) > 0.01;
       const sourceEndChanged = Math.abs(section.sourceEnd - trimDragState.originalSourceEnd) > 0.01;
+
+      // Save trim state before clearing
+      const trimEdge = trimDragState.edge;
+      const origSectionStart = trimDragState.originalStart;
+      const origSectionEnd = trimDragState.originalEnd;
+      const origSourceStart = trimDragState.originalSourceStart;
+      const origSourceEnd = trimDragState.originalSourceEnd;
+      const overlaySnaps = trimDragState.overlaySnapshots;
+      const audioOverlaySnaps = trimDragState.audioOverlaySnapshots;
+      const snapshotIds = new Set(overlaySnaps.map(s => s.id));
+      const audioSnapshotIds = new Set(audioOverlaySnaps.map(s => s.id));
+
+      // Source delta: how much the section's source range changed at the trimmed edge
+      const sourceDelta = trimEdge === 'left'
+        ? section.sourceStart - origSourceStart   // positive = shortened, negative = extended
+        : section.sourceEnd - origSourceEnd;       // negative = shortened, positive = extended
+      const durationDelta = (section.sourceEnd - section.sourceStart) - (origSourceEnd - origSourceStart);
+
       trimDragState = null;
       if (!sourceStartChanged && !sourceEndChanged) { undoStack.pop(); updateUndoRedoButtons(); return; }
       recalculateTimelinePositions();
+
+      // Apply overlay adjustments based on source-delta and alignment rules
+      const trimCtx: OverlayTrimContext = {
+        trimEdge: trimEdge as 'left' | 'right',
+        sourceDelta,
+        durationDelta,
+        sectionStart: section.start,
+        sectionEnd: section.end,
+        origSectionStart,
+        origSectionEnd
+      };
+
+      _applyOverlayTrimDelta(editorState.overlays as (Overlay | AudioOverlay)[], overlaySnaps, trimCtx);
+      _applyOverlayTrimDelta(editorState.audioOverlays as (Overlay | AudioOverlay)[], audioOverlaySnaps, trimCtx);
+
+      // Shift non-snapshotted overlays after the trim boundary to close/open gaps
+      if (Math.abs(durationDelta) > 0.001) {
+        const shiftBoundary = trimEdge === 'right' ? origSectionEnd : origSectionStart;
+        for (const o of editorState.overlays) {
+          if (snapshotIds.has(o.id)) continue;
+          if (o.startTime >= shiftBoundary - 0.01) {
+            o.startTime = roundMs(o.startTime + durationDelta);
+            o.endTime = roundMs(o.endTime + durationDelta);
+          }
+        }
+        for (const ao of editorState.audioOverlays) {
+          if (audioSnapshotIds.has(ao.id)) continue;
+          if (ao.startTime >= shiftBoundary - 0.01) {
+            ao.startTime = roundMs(ao.startTime + durationDelta);
+            ao.endTime = roundMs(ao.endTime + durationDelta);
+          }
+        }
+      }
+
       syncSectionAnchorKeyframes();
       renderSectionMarkers();
+      renderOverlayMarkers();
+      renderAudioOverlayMarkers();
       refreshWaveform();
       editorSeek(section.start);
       scheduleProjectSave();
@@ -4387,6 +4482,175 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         .sort((a, b) => a.time - b.time);
     }
 
+    function remapOverlaysAfterSectionDelete(
+      overlays: Overlay[],
+      removedSection: Section
+    ): { kept: Overlay[]; removed: Overlay[] } {
+      const epsilon = 0.01;
+      const sectionStart = removedSection.start;
+      const sectionEnd = removedSection.end;
+      const removedDuration = Math.max(0, sectionEnd - sectionStart);
+      const MIN_DURATION = 0.1;
+
+      const kept: Overlay[] = [];
+      const removed: Overlay[] = [];
+
+      for (const o of overlays) {
+        // Phase 1: DELETE — fully within section range
+        if (o.startTime >= sectionStart - epsilon && o.endTime <= sectionEnd + epsilon) {
+          removed.push(o);
+          continue;
+        }
+
+        // Phase 2: TRIM — partial overlap
+        const overlapsStart = o.startTime < sectionStart - epsilon && o.endTime > sectionStart + epsilon && o.endTime <= sectionEnd + epsilon;
+        const overlapsEnd = o.startTime >= sectionStart - epsilon && o.startTime < sectionEnd - epsilon && o.endTime > sectionEnd + epsilon;
+        const spansEntireSection = o.startTime < sectionStart - epsilon && o.endTime > sectionEnd + epsilon;
+
+        if (overlapsStart) {
+          // Overlay starts before section, ends within — trim endTime to sectionStart
+          const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
+          if (isVideoLike) {
+            const originalDuration = o.endTime - o.startTime;
+            const trimmedDuration = sectionStart - o.startTime;
+            const sourceSpan = o.sourceEnd - o.sourceStart;
+            o.sourceEnd = o.sourceStart + (sourceSpan * trimmedDuration / originalDuration);
+          }
+          o.endTime = sectionStart;
+          if (o.endTime - o.startTime < MIN_DURATION) {
+            removed.push(o);
+          } else {
+            kept.push(o);
+          }
+        } else if (overlapsEnd) {
+          // Overlay starts within section, ends after — trim startTime to sectionEnd, then shift
+          const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
+          if (isVideoLike) {
+            const originalDuration = o.endTime - o.startTime;
+            const trimAmount = sectionEnd - o.startTime;
+            const sourceSpan = o.sourceEnd - o.sourceStart;
+            o.sourceStart = o.sourceStart + (sourceSpan * trimAmount / originalDuration);
+          }
+          o.startTime = sectionEnd;
+          // Then shift (Phase 3 applies)
+          o.startTime = roundMs(o.startTime - removedDuration);
+          o.endTime = roundMs(o.endTime - removedDuration);
+          o.startTime = Math.max(0, o.startTime);
+          if (o.endTime - o.startTime < MIN_DURATION) {
+            removed.push(o);
+          } else {
+            kept.push(o);
+          }
+        } else if (spansEntireSection) {
+          // Overlay spans the entire deleted section — shrink by removedDuration
+          const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
+          if (isVideoLike) {
+            const originalDuration = o.endTime - o.startTime;
+            const sourceSpan = o.sourceEnd - o.sourceStart;
+            // Remove the proportion of source corresponding to the deleted section
+            const removedProportion = removedDuration / originalDuration;
+            const removedSourceDuration = sourceSpan * removedProportion;
+            // Shift source content after the cut point
+            o.sourceEnd = roundMs(o.sourceEnd - removedSourceDuration);
+          }
+          o.endTime = roundMs(o.endTime - removedDuration);
+          if (o.endTime - o.startTime < MIN_DURATION) {
+            removed.push(o);
+          } else {
+            kept.push(o);
+          }
+        } else if (o.startTime >= sectionEnd - epsilon) {
+          // Phase 3: SHIFT — overlay entirely after the deleted section
+          o.startTime = Math.max(0, roundMs(o.startTime - removedDuration));
+          o.endTime = roundMs(o.endTime - removedDuration);
+          kept.push(o);
+        } else {
+          // Overlay entirely before the deleted section — no change
+          kept.push(o);
+        }
+      }
+
+      return { kept, removed };
+    }
+
+    function remapAudioOverlaysAfterSectionDelete(
+      audioOverlays: AudioOverlay[],
+      removedSection: Section
+    ): { kept: AudioOverlay[]; removed: AudioOverlay[] } {
+      const epsilon = 0.01;
+      const sectionStart = removedSection.start;
+      const sectionEnd = removedSection.end;
+      const removedDuration = Math.max(0, sectionEnd - sectionStart);
+      const MIN_DURATION = 0.1;
+
+      const kept: AudioOverlay[] = [];
+      const removed: AudioOverlay[] = [];
+
+      for (const ao of audioOverlays) {
+        // Phase 1: DELETE — fully within section range
+        if (ao.startTime >= sectionStart - epsilon && ao.endTime <= sectionEnd + epsilon) {
+          removed.push(ao);
+          continue;
+        }
+
+        // Phase 2: TRIM — partial overlap
+        const overlapsStart = ao.startTime < sectionStart - epsilon && ao.endTime > sectionStart + epsilon && ao.endTime <= sectionEnd + epsilon;
+        const overlapsEnd = ao.startTime >= sectionStart - epsilon && ao.startTime < sectionEnd - epsilon && ao.endTime > sectionEnd + epsilon;
+        const spansEntireSection = ao.startTime < sectionStart - epsilon && ao.endTime > sectionEnd + epsilon;
+
+        if (overlapsStart) {
+          // Audio starts before section, ends within — trim endTime
+          const originalDuration = ao.endTime - ao.startTime;
+          const trimmedDuration = sectionStart - ao.startTime;
+          const sourceSpan = ao.sourceEnd - ao.sourceStart;
+          ao.sourceEnd = ao.sourceStart + (sourceSpan * trimmedDuration / originalDuration);
+          ao.endTime = sectionStart;
+          if (ao.endTime - ao.startTime < MIN_DURATION) {
+            removed.push(ao);
+          } else {
+            kept.push(ao);
+          }
+        } else if (overlapsEnd) {
+          // Audio starts within section, ends after — trim startTime, then shift
+          const originalDuration = ao.endTime - ao.startTime;
+          const trimAmount = sectionEnd - ao.startTime;
+          const sourceSpan = ao.sourceEnd - ao.sourceStart;
+          ao.sourceStart = ao.sourceStart + (sourceSpan * trimAmount / originalDuration);
+          ao.startTime = sectionEnd;
+          // Shift
+          ao.startTime = Math.max(0, roundMs(ao.startTime - removedDuration));
+          ao.endTime = roundMs(ao.endTime - removedDuration);
+          if (ao.endTime - ao.startTime < MIN_DURATION) {
+            removed.push(ao);
+          } else {
+            kept.push(ao);
+          }
+        } else if (spansEntireSection) {
+          // Audio spans entire deleted section — shrink by removedDuration
+          const originalDuration = ao.endTime - ao.startTime;
+          const sourceSpan = ao.sourceEnd - ao.sourceStart;
+          const removedSourceDuration = sourceSpan * (removedDuration / originalDuration);
+          ao.sourceEnd = roundMs(ao.sourceEnd - removedSourceDuration);
+          ao.endTime = roundMs(ao.endTime - removedDuration);
+          if (ao.endTime - ao.startTime < MIN_DURATION) {
+            removed.push(ao);
+          } else {
+            kept.push(ao);
+          }
+        } else if (ao.startTime >= sectionEnd - epsilon) {
+          // Phase 3: SHIFT — entirely after deleted section
+          ao.startTime = Math.max(0, roundMs(ao.startTime - removedDuration));
+          ao.endTime = roundMs(ao.endTime - removedDuration);
+          kept.push(ao);
+        } else {
+          // Entirely before — no change
+          kept.push(ao);
+        }
+      }
+
+      return { kept, removed };
+    }
+
     async function deleteSelectedSection(): Promise<void> {
       if (!editorState || editorState.rendering) return;
       const selectedSection = getSelectedSection();
@@ -4404,6 +4668,39 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       } else {
         await stageTakeIfUnreferenced(selectedSection.takeId!);
       }
+
+      // Cascade: remap overlays (delete/trim/shift)
+      const overlayResult = remapOverlaysAfterSectionDelete(editorState.overlays, selectedSection);
+      editorState.overlays = overlayResult.kept;
+      for (const removed of overlayResult.removed) {
+        if (removed.saved) {
+          editorState.savedOverlays.push(removed);
+        } else if (removed.mediaType !== 'window') {
+          const stillReferenced = editorState.overlays.some(o => o.mediaPath === removed.mediaPath)
+            || editorState.savedOverlays.some(o => o.mediaPath === removed.mediaPath);
+          if (!stillReferenced && activeProjectPath) {
+            window.electronAPI.stageOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
+          }
+        }
+      }
+
+      // Cascade: remap audio overlays (delete/trim/shift)
+      const audioResult = remapAudioOverlaysAfterSectionDelete(editorState.audioOverlays, selectedSection);
+      editorState.audioOverlays = audioResult.kept;
+      for (const removed of audioResult.removed) {
+        if (removed.saved) {
+          editorState.savedAudioOverlays.push(removed);
+        } else {
+          const stillReferenced = editorState.audioOverlays.some(ao => ao.mediaPath === removed.mediaPath)
+            || editorState.savedAudioOverlays.some(ao => ao.mediaPath === removed.mediaPath);
+          if (!stillReferenced && activeProjectPath) {
+            window.electronAPI.stageAudioOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
+          }
+        }
+      }
+
+      editorState.selectedOverlayId = null;
+      editorState.selectedAudioOverlayId = null;
 
       if (editorState.sections.length === 0 && editorState.savedSections.length === 0) {
         const savedSourceWidth = editorState.sourceWidth || null;
@@ -4453,6 +4750,9 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         refreshWaveform();
       }
 
+      renderOverlayMarkers();
+      renderAudioOverlayMarkers();
+      renderOverlayList();
       renderSectionTranscriptList();
       scheduleProjectSave();
     }
@@ -4567,90 +4867,6 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
 
       renderOverlayMarkers();
       renderAudioOverlayMarkers();
-      scheduleProjectSave();
-    }
-
-    async function deleteAllAtPlayhead(): Promise<void> {
-      if (!editorState || editorState.rendering) return;
-
-      // Delete the selected section (or section at playhead)
-      const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
-      if (!section) return;
-      const sectionStart = section.start;
-      const sectionEnd = section.end;
-
-      pushUndo();
-
-      // Delete overlays fully within the section's time range
-      for (let i = editorState.overlays.length - 1; i >= 0; i--) {
-        const o = editorState.overlays[i]!;
-        if (o.startTime >= sectionStart - 0.01 && o.endTime <= sectionEnd + 0.01) {
-          const removed = editorState.overlays.splice(i, 1)[0]!;
-          if (removed.saved) {
-            editorState.savedOverlays.push(removed);
-          } else if (removed.mediaType !== 'window') {
-            const stillReferenced = editorState.overlays.some(r => r.mediaPath === removed.mediaPath)
-              || editorState.savedOverlays.some(r => r.mediaPath === removed.mediaPath);
-            if (!stillReferenced && activeProjectPath) {
-              window.electronAPI.stageOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-            }
-          }
-        }
-      }
-
-      // Delete audio overlays fully within the section's time range
-      for (let i = editorState.audioOverlays.length - 1; i >= 0; i--) {
-        const ao = editorState.audioOverlays[i]!;
-        if (ao.startTime >= sectionStart - 0.01 && ao.endTime <= sectionEnd + 0.01) {
-          const removed = editorState.audioOverlays.splice(i, 1)[0]!;
-          if (removed.saved) {
-            editorState.savedAudioOverlays.push(removed);
-          } else {
-            const stillReferenced = editorState.audioOverlays.some(r => r.mediaPath === removed.mediaPath)
-              || editorState.savedAudioOverlays.some(r => r.mediaPath === removed.mediaPath);
-            if (!stillReferenced && activeProjectPath) {
-              window.electronAPI.stageAudioOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-            }
-          }
-        }
-      }
-
-      editorState.selectedOverlayId = null;
-      editorState.selectedAudioOverlayId = null;
-
-      // Now delete the section itself (same logic as deleteSelectedSection)
-      editorState.sections = editorState.sections.filter(s => s.id !== section.id);
-      if (section.saved) {
-        editorState.savedSections.push({ ...section });
-      } else {
-        await stageTakeIfUnreferenced(section.takeId!);
-      }
-
-      if (editorState.sections.length === 0) {
-        renderOverlayMarkers();
-        renderAudioOverlayMarkers();
-        renderOverlayList();
-        scheduleProjectSave();
-        return;
-      }
-
-      const remainingAnchors = editorState.keyframes.filter(
-        kf => kf.sectionId && kf.sectionId !== section.id
-      );
-      const remappedManual = remapManualKeyframesAfterSectionDelete(editorState.keyframes, section);
-      editorState.keyframes = [...remainingAnchors, ...remappedManual];
-
-      reindexSections(editorState.sections);
-      recalculateTimelinePositions();
-      syncSectionAnchorKeyframes();
-
-      renderSectionMarkers();
-      renderOverlayMarkers();
-      renderAudioOverlayMarkers();
-      renderOverlayList();
-      renderSectionTranscriptList();
-      refreshWaveform();
-      editorSeek(Math.min(editorState.currentTime, editorState.duration));
       scheduleProjectSave();
     }
 
@@ -7289,13 +7505,18 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         if (prevB !== null) editorSeek(prevB);
       } else if (e.code === 'Backspace' || e.code === 'Delete') {
         e.preventDefault();
-        if (e.metaKey || e.ctrlKey) {
-          deleteAllAtPlayhead();
-        } else if (editorState?.selectedOverlayId) {
+        if (editorState?.selectedOverlayId && !(e.metaKey || e.ctrlKey)) {
           deleteSelectedOverlay();
-        } else if (editorState?.selectedAudioOverlayId) {
+        } else if (editorState?.selectedAudioOverlayId && !(e.metaKey || e.ctrlKey)) {
           deleteSelectedAudioOverlay();
         } else {
+          // Cmd+Delete: find section at playhead; plain Delete: use selected section
+          if (e.metaKey || e.ctrlKey) {
+            const sectionAtPlayhead = findSectionForTime(editorState!.currentTime);
+            if (sectionAtPlayhead) {
+              editorState!.selectedSectionId = sectionAtPlayhead.id;
+            }
+          }
           deleteSelectedSection();
         }
       } else if (e.code === 'KeyS') {
@@ -7307,7 +7528,7 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
         } else if (editorState?.selectedAudioOverlayId) {
           splitAudioOverlayAtPlayhead();
         } else {
-          splitSectionAtPlayhead();
+          splitAllAtPlayhead();
         }
       } else if (e.code === 'KeyC') {
         e.preventDefault();

@@ -1,5 +1,6 @@
 import {
-  getOverlayStateAtTime
+  getOverlayStateAtTime,
+  applyOverlayTrimDelta
 } from '../../src/renderer/features/timeline/overlay-utils.js';
 
 interface OverlayPosition {
@@ -129,5 +130,182 @@ describe('renderer/features/timeline/overlay-utils', () => {
     const state = getOverlayStateAtTime(9.85, overlays, 'landscape');
     expect(state.x).toBe(100);
     expect(state.opacity).toBeCloseTo(0.5, 1);
+  });
+});
+
+// ── applyOverlayTrimDelta tests ───────────────────────────────────────
+
+interface MinimalOverlay {
+  id: string;
+  trackIndex: number;
+  startTime: number;
+  endTime: number;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
+function makeMinimalOverlay(overrides: Partial<MinimalOverlay> = {}): MinimalOverlay {
+  return {
+    id: 'ov1',
+    trackIndex: 0,
+    startTime: 0,
+    endTime: 30,
+    sourceStart: 0,
+    sourceEnd: 30,
+    ...overrides
+  };
+}
+
+function snap(o: MinimalOverlay): OverlayTrimSnapshot {
+  return {
+    id: o.id,
+    originalStartTime: o.startTime,
+    originalEndTime: o.endTime,
+    originalSourceStart: o.sourceStart,
+    originalSourceEnd: o.sourceEnd
+  };
+}
+
+describe('applyOverlayTrimDelta', () => {
+  describe('left-edge shortening', () => {
+    test('advances sourceStart for edge-aligned overlay on first section', () => {
+      // Section: sourceStart 0→10, after recalculate start=0, end=20
+      // Overlay starts at section start (edge-aligned)
+      const overlay = makeMinimalOverlay({ startTime: 0, endTime: 30, sourceStart: 0, sourceEnd: 30 });
+      const snaps = [snap(overlay)];
+      const ctx = {
+        trimEdge: 'left',
+        sourceDelta: 10,       // sourceStart moved from 0 to 10
+        durationDelta: -10,    // was 30s, now 20s
+        sectionStart: 0,       // after recalculate (first section)
+        sectionEnd: 20,        // after recalculate
+        origSectionStart: 0,
+        origSectionEnd: 30
+      };
+
+      applyOverlayTrimDelta([overlay] as unknown as Parameters<typeof applyOverlayTrimDelta>[0], snaps, ctx);
+
+      // sourceStart should advance by 10 (matching section's source advance)
+      expect(overlay.sourceStart).toBeCloseTo(10, 2);
+      // endTime should be clamped to sectionEnd (20)
+      expect(overlay.endTime).toBeCloseTo(20, 2);
+      // sourceEnd stays at 30: source 10→30 = 20s matches timeline 0→20
+      expect(overlay.sourceEnd).toBeCloseTo(30, 2);
+    });
+
+    test('advances sourceStart for edge-aligned overlay on non-first section', () => {
+      // Section 2: sourceStart 0→5, after recalculate start=15, end=20
+      // (Section 1 is 0-15, then section 2 follows)
+      const overlay = makeMinimalOverlay({ startTime: 15, endTime: 25, sourceStart: 0, sourceEnd: 10 });
+      const snaps = [snap(overlay)];
+      const ctx = {
+        trimEdge: 'left',
+        sourceDelta: 5,        // sourceStart moved from 0 to 5
+        durationDelta: -5,     // was 10s, now 5s
+        sectionStart: 15,      // after recalculate
+        sectionEnd: 20,        // after recalculate
+        origSectionStart: 15,
+        origSectionEnd: 25
+      };
+
+      applyOverlayTrimDelta([overlay] as unknown as Parameters<typeof applyOverlayTrimDelta>[0], snaps, ctx);
+
+      expect(overlay.sourceStart).toBeCloseTo(5, 2);
+      expect(overlay.endTime).toBeCloseTo(20, 2);
+    });
+
+    test('clamps overlay endTime to sectionEnd when section shrinks', () => {
+      // Single section trimmed from left: sourceStart 0→10, duration 30→20
+      // Overlay spans full section
+      const overlay = makeMinimalOverlay({ startTime: 0, endTime: 30, sourceStart: 0, sourceEnd: 30 });
+      const snaps = [snap(overlay)];
+      const ctx = {
+        trimEdge: 'left',
+        sourceDelta: 10,
+        durationDelta: -10,
+        sectionStart: 0,
+        sectionEnd: 20,
+        origSectionStart: 0,
+        origSectionEnd: 30
+      };
+
+      applyOverlayTrimDelta([overlay] as unknown as Parameters<typeof applyOverlayTrimDelta>[0], snaps, ctx);
+
+      // endTime clamped to sectionEnd
+      expect(overlay.endTime).toBeCloseTo(20, 2);
+      // sourceEnd recomputed: sourceStart=10, timeline duration=20, rate=1:1 → sourceEnd=30
+      expect(overlay.sourceEnd).toBeCloseTo(30, 2);
+      // Net result: source 10→30 (20s) mapped to timeline 0→20 (20s) ✓
+    });
+
+    test('preserves correct source mapping: overlay plays section source range', () => {
+      // This is THE critical test for the bug fix.
+      // After left-edge trim, the overlay should play exactly the section's source range.
+      const overlay = makeMinimalOverlay({ startTime: 0, endTime: 30, sourceStart: 0, sourceEnd: 30 });
+      const snaps = [snap(overlay)];
+      const ctx = {
+        trimEdge: 'left',
+        sourceDelta: 10,
+        durationDelta: -10,
+        sectionStart: 0,
+        sectionEnd: 20,
+        origSectionStart: 0,
+        origSectionEnd: 30
+      };
+
+      applyOverlayTrimDelta([overlay] as unknown as Parameters<typeof applyOverlayTrimDelta>[0], snaps, ctx);
+
+      // The overlay should now play source 10→30 over timeline 0→20
+      expect(overlay.sourceStart).toBeCloseTo(10, 2);
+      expect(overlay.sourceEnd).toBeCloseTo(30, 2);
+      expect(overlay.startTime).toBeCloseTo(0, 2);
+      expect(overlay.endTime).toBeCloseTo(20, 2);
+    });
+  });
+
+  describe('right-edge shortening', () => {
+    test('trims overlay endTime and sourceEnd when section right edge shortened', () => {
+      // Section: sourceEnd 30→20, after recalculate start=0, end=20
+      const overlay = makeMinimalOverlay({ startTime: 0, endTime: 30, sourceStart: 0, sourceEnd: 30 });
+      const snaps = [snap(overlay)];
+      const ctx = {
+        trimEdge: 'right',
+        sourceDelta: -10,      // sourceEnd moved from 30 to 20
+        durationDelta: -10,
+        sectionStart: 0,
+        sectionEnd: 20,
+        origSectionStart: 0,
+        origSectionEnd: 30
+      };
+
+      applyOverlayTrimDelta([overlay] as unknown as Parameters<typeof applyOverlayTrimDelta>[0], snaps, ctx);
+
+      expect(overlay.endTime).toBeCloseTo(20, 2);
+      expect(overlay.sourceEnd).toBeCloseTo(20, 2);
+      expect(overlay.sourceStart).toBeCloseTo(0, 2);
+    });
+  });
+
+  describe('left-edge extending', () => {
+    test('extends edge-aligned overlay sourceStart when section left edge extended', () => {
+      // Section: sourceStart 10→5, after recalculate start=0, end=25
+      // (section was start=0, end=20, now start=0, end=25 with 5 more at start)
+      const overlay = makeMinimalOverlay({ startTime: 0, endTime: 20, sourceStart: 10, sourceEnd: 30 });
+      const snaps = [snap(overlay)];
+      const ctx = {
+        trimEdge: 'left',
+        sourceDelta: -5,       // sourceStart moved from 10 to 5
+        durationDelta: 5,      // was 20s, now 25s
+        sectionStart: 0,       // after recalculate
+        sectionEnd: 25,        // after recalculate
+        origSectionStart: 0,
+        origSectionEnd: 20
+      };
+
+      applyOverlayTrimDelta([overlay] as unknown as Parameters<typeof applyOverlayTrimDelta>[0], snaps, ctx);
+
+      // Edge-aligned overlay should extend: startTime decreases, sourceStart decreases
+      expect(overlay.sourceStart).toBeCloseTo(5, 2);
+    });
   });
 });

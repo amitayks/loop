@@ -42,6 +42,7 @@ interface TakeEntry {
 interface InputPlan {
   screenIdx: number;
   cameraIdx: number;
+  audioOnlyIdx: number;
 }
 
 interface InputPlanResult {
@@ -162,7 +163,25 @@ function buildInputPlan(
         cameraIdx = inputIndex++;
       }
 
-      inputPlan = { screenIdx, cameraIdx };
+      // When no screen recording exists, find an audio source from the take
+      let audioOnlyIdx = -1;
+      if (screenIdx < 0) {
+        if (cameraIdx >= 0) {
+          // Camera was already added — reuse it for audio
+          audioOnlyIdx = cameraIdx;
+        } else if (take.cameraPath && typeof take.cameraPath === 'string' && take.cameraPath.trim()) {
+          // Camera exists but wasn't added (hasCamera=false) — add as audio source
+          try {
+            assertFilePath(take.cameraPath, 'Camera (audio-only)');
+            args.push('-i', take.cameraPath);
+            audioOnlyIdx = inputIndex++;
+          } catch {
+            // Camera file not found — audioOnlyIdx stays -1
+          }
+        }
+      }
+
+      inputPlan = { screenIdx, cameraIdx, audioOnlyIdx };
       takeInputs.set(section.takeId, inputPlan);
     }
 
@@ -463,15 +482,23 @@ async function renderComposite(
       filterParts.push(
         `[${wallpaperIdx}:v]trim=duration=${duration},setpts=PTS-STARTPTS,fps=fps=${targetFps},scale=${sourceWidth}:${sourceHeight},setsar=1[sv${i}]`
       );
-      // Generate silent audio for this section
+      // Extract audio from the take's available audio source, or generate silence
+      if (inputs.audioOnlyIdx >= 0) {
+        filterParts.push(`[${inputs.audioOnlyIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS${volumeFilter}[sa${i}]`);
+      } else {
+        filterParts.push(
+          `anullsrc=r=48000:cl=stereo,atrim=duration=${duration}${volumeFilter}[sa${i}]`
+        );
+      }
+    } else {
+      // No screen recording and no wallpaper — generate blank video + silence
+      console.warn(`[render-composite] Section ${i} has no screen (idx=${screenIdx}) and no wallpaper — generating blank frame + silence`);
+      filterParts.push(
+        `color=c=0x1E1E1E:s=${sourceWidth}x${sourceHeight}:r=${targetFps}:d=${duration},setsar=1[sv${i}]`
+      );
       filterParts.push(
         `anullsrc=r=48000:cl=stereo,atrim=duration=${duration}${volumeFilter}[sa${i}]`
       );
-    } else {
-      filterParts.push(
-        `[${screenIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=fps=${targetFps},setsar=1[sv${i}]`
-      );
-      filterParts.push(`[${screenIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS${volumeFilter}[sa${i}]`);
     }
   }
 

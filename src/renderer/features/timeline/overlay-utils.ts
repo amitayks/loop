@@ -1,6 +1,132 @@
-import type { Overlay, OutputMode, OverlayMediaType } from '../../../shared/types/domain.js';
+import type { Overlay, AudioOverlay, OutputMode, OverlayMediaType } from '../../../shared/types/domain.js';
+import { roundMs } from './section-utils.js';
 
 const TRANSITION_DURATION = 0.3;
+
+// ── Overlay Trim Snapshot ──────────────────────────────────────────
+
+export interface OverlayTrimSnapshot {
+  id: string;
+  originalStartTime: number;
+  originalEndTime: number;
+  originalSourceStart: number;
+  originalSourceEnd: number;
+}
+
+export interface OverlayTrimContext {
+  trimEdge: 'left' | 'right';
+  sourceDelta: number;       // how much the section's source boundary moved
+  durationDelta: number;     // newDuration - oldDuration (negative when shortened)
+  sectionStart: number;      // section.start after recalculate
+  sectionEnd: number;        // section.end after recalculate
+  origSectionStart: number;
+  origSectionEnd: number;
+}
+
+/**
+ * Adjust overlay times/sources after a section edge trim.
+ *
+ * SHORTEN: any overlay extending past the new section boundary is cut.
+ *          For left-edge shortening, overlays also have their sourceStart
+ *          advanced to match the section's source advance.
+ * EXTEND:  only edge-aligned overlays are extended by the source delta.
+ *
+ * Pure function — mutates the overlay objects in-place.
+ */
+export function applyOverlayTrimDelta(
+  overlayList: (Overlay | AudioOverlay)[],
+  snaps: OverlayTrimSnapshot[],
+  ctx: OverlayTrimContext
+): void {
+  const eps = 0.05;
+  const { trimEdge, sourceDelta, durationDelta, sectionStart, sectionEnd, origSectionStart, origSectionEnd } = ctx;
+  const isShortening = trimEdge === 'left' ? sourceDelta > 0.001 : sourceDelta < -0.001;
+  const isExtending = trimEdge === 'left' ? sourceDelta < -0.001 : sourceDelta > 0.001;
+
+  for (const snap of snaps) {
+    const o = overlayList.find((ov) => ov.id === snap.id);
+    if (!o) continue;
+    const track = ('trackIndex' in o) ? (o as { trackIndex: number }).trackIndex : 0;
+
+    if (trimEdge === 'right') {
+      const edgeAligned = Math.abs(snap.originalEndTime - origSectionEnd) <= eps;
+
+      if (isShortening) {
+        // Cut any overlay whose endTime extends past the new section end
+        if (snap.originalEndTime > sectionEnd + eps) {
+          o.endTime = roundMs(sectionEnd);
+          const timelineTrimmed = snap.originalEndTime - o.endTime;
+          const overlayDuration = snap.originalEndTime - snap.originalStartTime;
+          if (overlayDuration > 0) {
+            const sourceSpan = snap.originalSourceEnd - snap.originalSourceStart;
+            o.sourceEnd = roundMs(snap.originalSourceEnd - (sourceSpan * timelineTrimmed / overlayDuration));
+          }
+        }
+      } else if (isExtending && edgeAligned) {
+        let desiredEnd = roundMs(snap.originalEndTime + durationDelta);
+        const neighbors = overlayList.filter(
+          n => n.id !== o.id && ('trackIndex' in n ? (n as { trackIndex: number }).trackIndex : 0) === track && n.startTime > snap.originalEndTime - eps
+        );
+        if (neighbors.length > 0) {
+          const nearestStart = Math.min(...neighbors.map(n => n.startTime));
+          desiredEnd = Math.min(desiredEnd, nearestStart);
+        }
+        const actualDelta = desiredEnd - snap.originalEndTime;
+        o.endTime = roundMs(desiredEnd);
+        const fullDelta = durationDelta;
+        const sourceAdjust = fullDelta !== 0 ? sourceDelta * (actualDelta / fullDelta) : 0;
+        o.sourceEnd = roundMs(snap.originalSourceEnd + sourceAdjust);
+      }
+    } else {
+      // Left edge
+      const edgeAligned = Math.abs(snap.originalStartTime - origSectionStart) <= eps;
+
+      if (isShortening) {
+        const overlayDuration = snap.originalEndTime - snap.originalStartTime;
+        const sourceSpan = snap.originalSourceEnd - snap.originalSourceStart;
+        const sourceRate = overlayDuration > 0 ? sourceSpan / overlayDuration : 0;
+
+        // Advance sourceStart by the section's source delta (proportional to overlap)
+        if (edgeAligned && overlayDuration > 0) {
+          // Edge-aligned: advance sourceStart by the full sourceDelta
+          o.sourceStart = roundMs(snap.originalSourceStart + sourceDelta);
+        } else if (snap.originalStartTime < sectionStart - eps && overlayDuration > 0) {
+          // Overlay starts before new section start — clip at boundary
+          o.startTime = roundMs(sectionStart);
+          const timelineTrimmed = o.startTime - snap.originalStartTime;
+          o.sourceStart = roundMs(snap.originalSourceStart + (sourceSpan * timelineTrimmed / overlayDuration));
+        }
+
+        // Clamp endTime to sectionEnd (section got shorter, overlay may overshoot)
+        if (snap.originalEndTime > sectionEnd + eps) {
+          o.endTime = roundMs(sectionEnd);
+        }
+
+        // Recompute sourceEnd from the final timeline duration and source rate
+        // so sourceStart advance and endTime clamp don't compound incorrectly
+        if (overlayDuration > 0) {
+          const finalTimelineDuration = o.endTime - o.startTime;
+          o.sourceEnd = roundMs(o.sourceStart + finalTimelineDuration * sourceRate);
+        }
+      } else if (isExtending && edgeAligned) {
+        let desiredStart = roundMs(snap.originalStartTime + durationDelta);
+        const neighbors = overlayList.filter(
+          n => n.id !== o.id && ('trackIndex' in n ? (n as { trackIndex: number }).trackIndex : 0) === track && n.endTime < snap.originalStartTime + eps
+        );
+        if (neighbors.length > 0) {
+          const nearestEnd = Math.max(...neighbors.map(n => n.endTime));
+          desiredStart = Math.max(desiredStart, nearestEnd);
+        }
+        desiredStart = Math.max(0, desiredStart);
+        const actualDelta = desiredStart - snap.originalStartTime;
+        o.startTime = roundMs(desiredStart);
+        const fullDelta = durationDelta;
+        const sourceAdjust = fullDelta !== 0 ? sourceDelta * (actualDelta / fullDelta) : 0;
+        o.sourceStart = roundMs(Math.max(0, snap.originalSourceStart + sourceAdjust));
+      }
+    }
+  }
+}
 
 /** Returned when the playhead is inside an overlay's time span. */
 export interface OverlayStateActive {
