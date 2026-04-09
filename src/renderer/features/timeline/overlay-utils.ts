@@ -187,27 +187,29 @@ function getOverlayStateAtTime(
       opacity = Math.min(opacity, Math.max(0, (o.endTime - time) / FADE));
     }
 
-    // Position interpolation with adjacent same-media segment
-    // Only ONE side handles the transition to avoid double-animation:
-    // The SECOND segment handles the full interpolation from prev->current during its FADE window.
-    // The FIRST segment does NOT interpolate toward next -- it stays at its own position.
+    // Adjacent same-media neighbor detection (checked independently)
     const prev: Overlay | undefined = i > 0 ? overlays[i - 1] : undefined;
-    if (prev && prev.mediaPath === o.mediaPath && Math.abs(o.startTime - prev.endTime) < 0.01) {
+    const next: Overlay | undefined = i < overlays.length - 1 ? overlays[i + 1] : undefined;
+    const hasPrevSameMedia = !!(prev && prev.mediaPath === o.mediaPath && Math.abs(o.startTime - prev.endTime) < 0.01);
+    const hasNextSameMedia = !!(next && next.mediaPath === o.mediaPath && Math.abs(next.startTime - o.endTime) < 0.01);
+
+    // Suppress fade-in when prev is same media (transition handled by this segment)
+    // Suppress fade-out when next is same media (transition handled by next segment)
+    if (hasPrevSameMedia || hasNextSameMedia) {
+      opacity = 1;
+    }
+
+    // Position interpolation: the SECOND segment handles the interpolation from
+    // prev position to its own during the first FADE seconds.
+    if (hasPrevSameMedia) {
       const elapsed = time - o.startTime;
       if (elapsed >= 0 && elapsed < FADE) {
         const t = elapsed / FADE;
-        const prevPos = prev[mode] || { x: 0, y: 0, width: 400, height: 300 };
+        const prevPos = prev![mode] || { x: 0, y: 0, width: 400, height: 300 };
         x = prevPos.x + (x - prevPos.x) * t;
         y = prevPos.y + (y - prevPos.y) * t;
         width = prevPos.width + (width - prevPos.width) * t;
         height = prevPos.height + (height - prevPos.height) * t;
-        opacity = 1;
-      }
-    } else {
-      // Only suppress fade-out if next segment is same media (transition handled by next)
-      const next: Overlay | undefined = i < overlays.length - 1 ? overlays[i + 1] : undefined;
-      if (next && next.mediaPath === o.mediaPath && Math.abs(next.startTime - o.endTime) < 0.01) {
-        opacity = 1; // no fade-out, next segment will handle the transition
       }
     }
 

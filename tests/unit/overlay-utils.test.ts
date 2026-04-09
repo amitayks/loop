@@ -131,6 +131,33 @@ describe('renderer/features/timeline/overlay-utils', () => {
     expect(state.x).toBe(100);
     expect(state.opacity).toBeCloseTo(0.5, 1);
   });
+
+  test('middle segment of 3 same-media segments has no fade at either boundary', () => {
+    // After splitting an overlay twice: [A(0-10), B(10-22), C(22-30)]
+    // B should have opacity=1 everywhere — no fade-out near B's end
+    const overlays = [
+      makeOverlay({ id: 'A', startTime: 0, endTime: 10 }),
+      makeOverlay({ id: 'B', startTime: 10, endTime: 22 }),
+      makeOverlay({ id: 'C', startTime: 22, endTime: 30 })
+    ];
+    // Near B's end (within FADE window of 0.3s)
+    const nearEnd = getOverlayStateAtTime(21.85, overlays, 'landscape', 30);
+    expect(nearEnd.active).toBe(true);
+    expect(nearEnd.overlayId).toBe('B');
+    expect(nearEnd.opacity).toBe(1); // must NOT fade out — C follows
+
+    // Near B's start (within FADE window)
+    const nearStart = getOverlayStateAtTime(10.1, overlays, 'landscape', 30);
+    expect(nearStart.active).toBe(true);
+    expect(nearStart.overlayId).toBe('B');
+    expect(nearStart.opacity).toBe(1); // must NOT fade in — A precedes
+
+    // Middle of B
+    const middle = getOverlayStateAtTime(16, overlays, 'landscape', 30);
+    expect(middle.active).toBe(true);
+    expect(middle.overlayId).toBe('B');
+    expect(middle.opacity).toBe(1);
+  });
 });
 
 // ── applyOverlayTrimDelta tests ───────────────────────────────────────
