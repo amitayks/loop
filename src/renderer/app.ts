@@ -5001,6 +5001,20 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       const recordedDuration = (Date.now() - startTime) / 1000;
       clearInterval(timerInterval!);
 
+      // Stop recorders and canvas intervals immediately so file durations
+      // match recordedDuration (before any async cleanup adds delay).
+      if (screenRecInterval) {
+        clearInterval(screenRecInterval);
+        screenRecInterval = null;
+      }
+      for (const interval of windowRecIntervals) {
+        clearInterval(interval);
+      }
+      windowRecIntervals = [];
+      recorders.forEach(r => {
+        if (r.state !== 'inactive') r.stop();
+      });
+
       try {
         mouseTrailSamples = await window.electronAPI.stopMouseTrail();
       } catch (_) {
@@ -5027,20 +5041,6 @@ type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; pat
       }
       scribeWs = null;
       audioChunkBuffer = [];
-
-      if (screenRecInterval) {
-        clearInterval(screenRecInterval);
-        screenRecInterval = null;
-      }
-
-      for (const interval of windowRecIntervals) {
-        clearInterval(interval);
-      }
-      windowRecIntervals = [];
-
-      recorders.forEach(r => {
-        if (r.state !== 'inactive') r.stop();
-      });
 
       const results: Record<string, { blob: Blob; path: string }> = {};
       for (const r of recorders) {

@@ -155,12 +155,20 @@ export function normalizeSections(rawSections: unknown, duration: unknown): Sect
         end = Math.min(end, safeDuration);
       }
 
+      let sourceStart = Number.isFinite(Number(section.sourceStart)) ? Number(section.sourceStart) : start;
+      let sourceEnd = Number.isFinite(Number(section.sourceEnd)) ? Number(section.sourceEnd) : end;
+      // Clamp source range to recording duration
+      if (safeDuration > 0) {
+        sourceStart = Math.max(0, Math.min(sourceStart, safeDuration));
+        sourceEnd = Math.max(sourceStart, Math.min(sourceEnd, safeDuration));
+      }
+
       return {
         id: section.id || `section-${idx + 1}`,
         index: 0,
         label: '',
-        sourceStart: Number.isFinite(Number(section.sourceStart)) ? Number(section.sourceStart) : start,
-        sourceEnd: Number.isFinite(Number(section.sourceEnd)) ? Number(section.sourceEnd) : end,
+        sourceStart,
+        sourceEnd,
         start: roundMs(start),
         end: roundMs(end),
         duration: 0,
