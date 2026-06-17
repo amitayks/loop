@@ -1,5 +1,11 @@
 import type { Keyframe, OutputMode, Overlay, AudioOverlay, ScreenFitMode } from '../../shared/types/domain.js';
 import type { OverlayFilterResult } from '../../shared/types/services.js';
+import { easeInOutExpr } from '../../shared/domain/easing.js';
+import { getContentWidth } from '../../shared/domain/canvas.js';
+
+// Re-export the canonical getContentWidth so render-service.ts and
+// thumbnail-service.ts (which import it from here) keep working.
+export { getContentWidth };
 
 export const TRANSITION_DURATION = 0.3;
 
@@ -9,7 +15,7 @@ export const TRANSITION_DURATION = 0.3;
  */
 function easeExpr(timeVar: string, tStart: number): string {
   const p = `(${timeVar}-${tStart.toFixed(3)})/${TRANSITION_DURATION.toFixed(3)}`;
-  return `if(lt(${p},0.5),2*${p}*${p},1-pow(-2*${p}+2,2)/2)`;
+  return easeInOutExpr(p);
 }
 
 export function resolveOutputSize(
@@ -165,18 +171,6 @@ export function buildCamFullAlphaExpr(keyframes: Keyframe[]): string {
     }
   }
   return expr;
-}
-
-export function getContentWidth(
-  sourceW: number | null,
-  sourceH: number | null,
-  fitMode: ScreenFitMode,
-  canvasW: number,
-  canvasH: number
-): number {
-  if (fitMode !== 'fit' || !sourceW || !sourceH) return canvasW;
-  const scale = Math.min(canvasW / sourceW, canvasH / sourceH);
-  return sourceW * scale;
 }
 
 export function buildScreenFilter(

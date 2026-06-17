@@ -72,3 +72,19 @@ const api: ElectronAPI = {
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);
+
+// Narrow diagnostic: forward uncaught renderer errors to console.error so the main
+// process (and the e2e smoke) can observe them via the [renderer-uncaught] marker.
+// Inlined (rather than imported from a sibling module) because Electron's sandboxed
+// preload cannot resolve relative requires; the same logic is unit-tested via the
+// exported installRendererErrorForwarding() in preload-error-forwarding.ts. The
+// `window` guard keeps this import-safe under the node-environment unit tests.
+const rendererWindow = (globalThis as { window?: Window }).window;
+if (rendererWindow && typeof rendererWindow.addEventListener === 'function') {
+  rendererWindow.addEventListener('error', (e) => {
+    console.error('[renderer-uncaught] ' + ((e as ErrorEvent)?.message ?? e));
+  });
+  rendererWindow.addEventListener('unhandledrejection', (e) => {
+    console.error('[renderer-uncaught] ' + (e as PromiseRejectionEvent)?.reason);
+  });
+}

@@ -13,9 +13,16 @@ export interface ConsoleMessageInfo {
 export interface CreateWindowOptions {
   BrowserWindow: typeof import('electron').BrowserWindow;
   onConsoleMessage?: (info: ConsoleMessageInfo) => void;
+  onDidFinishLoad?: () => void;
+  onRenderProcessGone?: (details: { reason?: string }) => void;
 }
 
-export function createWindow({ BrowserWindow, onConsoleMessage }: CreateWindowOptions): BrowserWindowType {
+export function createWindow({
+  BrowserWindow,
+  onConsoleMessage,
+  onDidFinishLoad,
+  onRenderProcessGone
+}: CreateWindowOptions): BrowserWindowType {
   const win = new BrowserWindow({
     width: 960,
     height: 800,
@@ -31,6 +38,14 @@ export function createWindow({ BrowserWindow, onConsoleMessage }: CreateWindowOp
       return;
     }
     console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+  });
+
+  win.webContents.on('did-finish-load', () => {
+    onDidFinishLoad?.();
+  });
+
+  win.webContents.on('render-process-gone', (_event: ElectronEvent, details: { reason?: string }) => {
+    onRenderProcessGone?.({ reason: details?.reason });
   });
 
   win.loadFile(path.join(__dirname, '..', '..', 'index.html'));

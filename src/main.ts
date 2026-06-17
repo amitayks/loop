@@ -45,6 +45,12 @@ function createMainWindow(): void {
     BrowserWindow,
     onConsoleMessage: ({ level, message, line, sourceId }) => {
       console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+    },
+    onDidFinishLoad: () => {
+      console.log('[renderer-loaded]');
+    },
+    onRenderProcessGone: (d) => {
+      console.log('[renderer-gone] ' + (d?.reason ?? 'unknown'));
     }
   });
   win.on('closed', () => {
