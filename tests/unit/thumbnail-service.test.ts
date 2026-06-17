@@ -343,6 +343,85 @@ describe('main/services/thumbnail-service', () => {
       // Reel mode should include a crop filter for 9:16 aspect
       expect(filterGraph).toContain('crop=');
     });
+
+    test('reel mode + overlays builds in landscape and applies reel crop at end', async () => {
+      // Regression: reel mode with overlays must mirror render-service pattern —
+      // build pipeline in landscape space, composite overlays there, then apply
+      // the reel crop using reelCropX. Previously the thumbnail service cropped
+      // the screen first and then tried to composite overlays onto the cropped
+      // reel frame, which positioned them incorrectly (and reelCropX effectively
+      // defaulted to leftmost for overlays).
+      let capturedArgs: string[] = [];
+      const deps = makeBaseDeps();
+      deps.runFfmpeg = async (opts) => {
+        capturedArgs = opts.args;
+        return { stderr: '' };
+      };
+
+      await captureThumbnail(
+        makeBaseOpts({
+          outputMode: 'reel',
+          keyframes: [makeKeyframe({ reelCropX: 0.5 })],
+          overlays: [makeOverlay({ mediaType: 'image', mediaPath: 'overlays/img.png' })]
+        }),
+        deps
+      );
+
+      const filterIdx = capturedArgs.indexOf('-filter_complex');
+      const filterGraph = capturedArgs[filterIdx + 1]!;
+      // Pipeline is built in landscape, then cropped to reel via [pre_reel_crop] → [out]
+      expect(filterGraph).toContain('[pre_reel_crop]');
+      expect(filterGraph).toContain('crop=');
+      // Final [out] label should come from the reel crop step, not the screen filter
+      expect(filterGraph).toMatch(/\[pre_reel_crop\]crop=[^[]*\[out\]/);
+    });
+
+    test('reel mode + overlays applies reelCropX from keyframe, not default', async () => {
+      let capturedArgs: string[] = [];
+      const deps = makeBaseDeps();
+      deps.runFfmpeg = async (opts) => {
+        capturedArgs = opts.args;
+        return { stderr: '' };
+      };
+
+      // Capture with reelCropX = 1 (rightmost)
+      await captureThumbnail(
+        makeBaseOpts({
+          outputMode: 'reel',
+          keyframes: [makeKeyframe({ reelCropX: 1 })],
+          overlays: [makeOverlay({ mediaType: 'image', mediaPath: 'overlays/img.png' })]
+        }),
+        deps
+      );
+
+      const filterIdx = capturedArgs.indexOf('-filter_complex');
+      const filterGraphRight = capturedArgs[filterIdx + 1]!;
+
+      // Capture with reelCropX = -1 (leftmost)
+      await captureThumbnail(
+        makeBaseOpts({
+          outputMode: 'reel',
+          keyframes: [makeKeyframe({ reelCropX: -1 })],
+          overlays: [makeOverlay({ mediaType: 'image', mediaPath: 'overlays/img.png' })]
+        }),
+        deps
+      );
+
+      const filterIdx2 = capturedArgs.indexOf('-filter_complex');
+      const filterGraphLeft = capturedArgs[filterIdx2 + 1]!;
+
+      // Extract the reel crop X position from the [pre_reel_crop]crop=... filter
+      const rightMatch = filterGraphRight.match(/\[pre_reel_crop\]crop=(\d+):(\d+):(\d+):0/);
+      const leftMatch = filterGraphLeft.match(/\[pre_reel_crop\]crop=(\d+):(\d+):(\d+):0/);
+      expect(rightMatch).not.toBeNull();
+      expect(leftMatch).not.toBeNull();
+      const rightCropX = Number(rightMatch![3]);
+      const leftCropX = Number(leftMatch![3]);
+      // Right should have a larger crop X than left
+      expect(rightCropX).toBeGreaterThan(leftCropX);
+      // Left should be at 0 (leftmost edge of content)
+      expect(leftCropX).toBe(0);
+    });
   });
 
   // 3.6 Overlay inclusion
@@ -463,6 +542,78 @@ describe('main/services/thumbnail-service', () => {
     });
   });
 
+  // Wallpaper-base capture (window-only takes, no screen recording)
+  describe('wallpaper-base capture (window-only take)', () => {
+    test('uses lavfi color input when no wallpaper path provided', async () => {
+      let capturedArgs: string[] = [];
+      const deps = makeBaseDeps();
+      deps.runFfmpeg = async ({ args }: { args: string[] }) => {
+        capturedArgs = args;
+        return { stderr: '' };
+      };
+
+      await captureThumbnail(
+        makeBaseOpts({
+          takes: [{ id: 'take-1', screenPath: null, cameraPath: null, windowPaths: [{ name: 'Win', path: '/project/win0.webm' }] }],
+          overlays: [makeOverlay({ mediaType: 'window', mediaPath: 'overlays/win0.webm' })],
+          wallpaperPath: null
+        }),
+        deps
+      );
+
+      // Input 0 should be lavfi color source
+      const iIdx = capturedArgs.indexOf('-i');
+      expect(iIdx).toBeGreaterThanOrEqual(0);
+      expect(capturedArgs.slice(0, iIdx + 2).join(' ')).toContain('-f lavfi');
+      expect(capturedArgs.slice(0, iIdx + 2).join(' ')).toContain('color=c=0x1E1E1E');
+    });
+
+    test('uses wallpaper image when wallpaperPath provided', async () => {
+      let capturedArgs: string[] = [];
+      const deps = makeBaseDeps();
+      deps.runFfmpeg = async ({ args }: { args: string[] }) => {
+        capturedArgs = args;
+        return { stderr: '' };
+      };
+
+      await captureThumbnail(
+        makeBaseOpts({
+          takes: [{ id: 'take-1', screenPath: null, cameraPath: null, windowPaths: [{ name: 'Win', path: '/project/win0.webm' }] }],
+          overlays: [makeOverlay({ mediaType: 'window', mediaPath: 'overlays/win0.webm' })],
+          // Use a path that won't exist so the code falls back to lavfi,
+          // but still exercises the branch that checks for wallpaper existence
+          wallpaperPath: '/tmp/nonexistent-wallpaper.png'
+        }),
+        deps
+      );
+
+      // Falls back to lavfi color since file doesn't exist
+      const joined = capturedArgs.join(' ');
+      expect(joined).toContain('-f lavfi');
+    });
+
+    test('still produces -frames:v 1 output for window-only take', async () => {
+      let capturedArgs: string[] = [];
+      const deps = makeBaseDeps();
+      deps.runFfmpeg = async ({ args }: { args: string[] }) => {
+        capturedArgs = args;
+        return { stderr: '' };
+      };
+
+      const result = await captureThumbnail(
+        makeBaseOpts({
+          takes: [{ id: 'take-1', screenPath: null, cameraPath: null, windowPaths: [{ name: 'Win', path: '/project/win0.webm' }] }],
+          overlays: [makeOverlay({ mediaType: 'window', mediaPath: 'overlays/win0.webm' })]
+        }),
+        deps
+      );
+
+      expect(capturedArgs).toContain('-frames:v');
+      expect(capturedArgs).toContain('1');
+      expect(result).toMatch(/thumbnail-\d+-landscape\.png$/);
+    });
+  });
+
   // Validation
   describe('validation', () => {
     test('throws for missing project folder', async () => {
@@ -471,10 +622,10 @@ describe('main/services/thumbnail-service', () => {
       ).rejects.toThrow(/Missing project folder/);
     });
 
-    test('throws for no take with screen path', async () => {
+    test('throws when no screen path and no window overlays', async () => {
       await expect(
         captureThumbnail(
-          makeBaseOpts({ takes: [{ id: 'take-1', screenPath: null }] }),
+          makeBaseOpts({ takes: [{ id: 'take-1', screenPath: null }], overlays: [] }),
           makeBaseDeps()
         )
       ).rejects.toThrow(/No take with screen path found/);

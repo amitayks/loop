@@ -70,6 +70,17 @@ interface EarlyExit {
   elapsed: number;
 }
 
+const LOADED_MARKER = '[renderer-loaded]';
+const ERROR_MARKERS = ['[renderer:3]', '[renderer-uncaught]', '[renderer-gone]'];
+const LOAD_TIMEOUT_MS = 8000;
+const POLL_INTERVAL_MS = 100;
+
+function findErrorMarkerLines(buffer: string): string[] {
+  return buffer
+    .split('\n')
+    .filter((line) => ERROR_MARKERS.some((marker) => line.includes(marker)));
+}
+
 async function runSmoke(): Promise<void> {
   const spawnSpec = getElectronSpawnSpec();
   const child = spawn(spawnSpec.command, spawnSpec.args, {
@@ -82,9 +93,12 @@ async function runSmoke(): Promise<void> {
     }
   });
 
-  let stderr = '';
+  let output = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    output += String(chunk || '');
+  });
   child.stderr.on('data', (chunk: Buffer) => {
-    stderr += String(chunk || '');
+    output += String(chunk || '');
   });
 
   const startedAt = Date.now();
@@ -96,20 +110,36 @@ async function runSmoke(): Promise<void> {
     }
   });
 
-  await wait(4000);
+  try {
+    // Poll for the positive readiness marker (or an early exit) up to the timeout.
+    while (Date.now() - startedAt < LOAD_TIMEOUT_MS) {
+      if (earlyExit) break;
+      if (output.includes(LOADED_MARKER)) break;
+      await wait(POLL_INTERVAL_MS);
+    }
 
-  if (earlyExit) {
-    const ee = earlyExit as EarlyExit;
-    throw new Error(
-      `Electron exited too early (${ee.elapsed}ms, code=${ee.code}, signal=${ee.signal}).\n${stderr}`
-    );
+    if (earlyExit) {
+      const ee = earlyExit as EarlyExit;
+      throw new Error(
+        `Electron exited too early (${ee.elapsed}ms, code=${ee.code}, signal=${ee.signal}).\n${output}`
+      );
+    }
+
+    if (child.exitCode !== null) {
+      throw new Error(`Electron exited unexpectedly with code ${child.exitCode}.\n${output}`);
+    }
+
+    const errorLines = findErrorMarkerLines(output);
+    if (errorLines.length > 0) {
+      throw new Error(`Renderer reported errors:\n${errorLines.join('\n')}\n\nFull output:\n${output}`);
+    }
+
+    if (!output.includes(LOADED_MARKER)) {
+      throw new Error(`Renderer never finished loading (no ${LOADED_MARKER}).\n${output}`);
+    }
+  } finally {
+    await terminateChild(child);
   }
-
-  if (child.exitCode !== null) {
-    throw new Error(`Electron exited unexpectedly with code ${child.exitCode}.\n${stderr}`);
-  }
-
-  await terminateChild(child);
 }
 
 runSmoke()

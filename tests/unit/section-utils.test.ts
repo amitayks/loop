@@ -81,6 +81,22 @@ describe('section-utils', () => {
       expect(result[1]!.saved).toBe(false);
       expect(result[2]!.saved).toBe(false);
     });
+    test('does NOT clamp sourceStart/sourceEnd against duration argument', () => {
+      // Regression: normalizeSections is called during project load with
+      // duration = timeline duration (not take source duration). Source
+      // pointers correctly reference the take's full recording range, which
+      // can be larger than the timeline duration. Clamping them here would
+      // destroy the source pointers and break playback/render.
+      const raw = [
+        { start: 0, end: 2.53, sourceStart: 100, sourceEnd: 102.53 },
+        { start: 2.53, end: 5, sourceStart: 200, sourceEnd: 202.47 }
+      ];
+      const result = normalizeSections(raw, 13.27); // timeline duration
+      expect(result[0]!.sourceStart).toBe(100);
+      expect(result[0]!.sourceEnd).toBe(102.53);
+      expect(result[1]!.sourceStart).toBe(200);
+      expect(result[1]!.sourceEnd).toBe(202.47);
+    });
   });
 
   describe('buildDefaultSectionsForDuration', () => {
@@ -109,6 +125,22 @@ describe('section-utils', () => {
       const result = normalizeTakeSections(raw, 10);
       expect(result).toHaveLength(1);
       expect(result[0]!.end).toBe(3);
+    });
+    test('clamps sourceStart/sourceEnd to take duration (fresh take path)', () => {
+      // For fresh takes, duration IS the source duration, so clamping is valid
+      const raw = [
+        { start: 0, end: 5, sourceStart: 0, sourceEnd: 5.15 } // Scribe padding overshoot
+      ];
+      const result = normalizeTakeSections(raw, 5);
+      expect(result[0]!.sourceEnd).toBe(5); // clamped to duration
+    });
+    test('drops sections whose source range becomes zero after clamping', () => {
+      const raw = [
+        { start: 0, end: 5, sourceStart: 10, sourceEnd: 15 } // entirely beyond duration
+      ];
+      const result = normalizeTakeSections(raw, 5);
+      // Section gets dropped because sourceEnd clamp == sourceStart clamp = 5
+      expect(result).toHaveLength(0);
     });
   });
 
