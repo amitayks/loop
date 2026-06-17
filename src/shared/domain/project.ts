@@ -1,5 +1,21 @@
 import path from 'path';
 
+// Browser-safe field helpers live in project-fields.ts (no Node deps) so the
+// renderer can bundle them; re-export here so the main process imports unchanged.
+import {
+  generateOverlayId,
+  generateAudioOverlayId,
+  normalizePipScale,
+  normalizeExportAudioPreset
+} from './project-fields.js';
+
+export {
+  generateOverlayId,
+  generateAudioOverlayId,
+  normalizePipScale,
+  normalizeExportAudioPreset
+};
+
 import type {
   Section,
   Keyframe,
@@ -76,13 +92,10 @@ import {
   MAX_CAMERA_SYNC_OFFSET_MS,
   MIN_REEL_CROP_X,
   MAX_REEL_CROP_X,
-  MIN_PIP_SCALE,
-  MAX_PIP_SCALE,
   DEFAULT_PIP_SCALE,
   MAX_OVERLAY_TRACKS,
   MAX_AUDIO_TRACKS,
   DEFAULT_AUDIO_VOLUME,
-  EXPORT_AUDIO_PRESET_OFF,
   EXPORT_AUDIO_PRESET_COMPRESSED,
   OUTPUT_MODE_LANDSCAPE,
   OUTPUT_MODE_REEL,
@@ -96,21 +109,8 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type RawRecord = Record<string, any>;
 
-let overlayIdCounter = 0;
-let audioOverlayIdCounter = 0;
-
 export function createProjectId(): string {
   return `project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-export function generateOverlayId(): string {
-  overlayIdCounter += 1;
-  return `overlay-${Date.now()}-${overlayIdCounter}`;
-}
-
-export function generateAudioOverlayId(): string {
-  audioOverlayIdCounter += 1;
-  return `audio-overlay-${Date.now()}-${audioOverlayIdCounter}`;
 }
 
 
@@ -227,24 +227,12 @@ export function normalizeOutputMode(value: unknown): OutputMode {
   return value === OUTPUT_MODE_REEL ? OUTPUT_MODE_REEL : OUTPUT_MODE_LANDSCAPE;
 }
 
-export function normalizePipScale(value: unknown): number {
-  if (value === null || value === undefined) return DEFAULT_PIP_SCALE;
-  const v = Number(value);
-  if (!Number.isFinite(v)) return DEFAULT_PIP_SCALE;
-  return Math.max(MIN_PIP_SCALE, Math.min(MAX_PIP_SCALE, v));
-}
-
 export function normalizePipSnapPoint(value: unknown): PipSnapPoint {
   return (VALID_PIP_SNAP_POINTS as readonly string[]).includes(value as string)
     ? value as PipSnapPoint
     : DEFAULT_PIP_SNAP_POINT;
 }
 
-export function normalizeExportAudioPreset(value: unknown): ExportAudioPreset {
-  return value === EXPORT_AUDIO_PRESET_OFF
-    ? EXPORT_AUDIO_PRESET_OFF
-    : EXPORT_AUDIO_PRESET_COMPRESSED;
-}
 
 export function normalizeCameraSyncOffsetMs(value: unknown): number {
   const offset = Math.round(Number(value));
