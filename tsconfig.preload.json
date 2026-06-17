@@ -13,7 +13,8 @@
     "types": ["node"]
   },
   "include": [
-    "src/preload.ts"
+    "src/preload.ts",
+    "src/preload-error-forwarding.ts"
   ],
   "references": [
     { "path": "./tsconfig.shared.json" }
