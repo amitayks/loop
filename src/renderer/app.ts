@@ -1,172 +1,332 @@
 import {
-  normalizeTranscriptText,
-  stripNonSpeechAnnotations,
-  extractSpokenWordTokens
-} from './features/transcript/transcript-utils.js';
-import type { ScribeToken } from './features/transcript/transcript-utils.js';
-import {
   roundMs,
-  buildRemappedSectionsFromSegments,
   normalizeSections,
-  buildDefaultSectionsForDuration,
-  normalizeTakeSections,
-  attachSectionTranscripts
+  normalizeTakeSections
 } from './features/timeline/section-utils.js';
 import {
-  generateSectionId,
-  reindexSections,
-  buildSplitAnchorKeyframe
-} from './features/timeline/keyframe-ops.js';
-import {
-  computeCameraPlaybackDrift,
   normalizeCameraSyncOffsetMs,
   resolveCameraPlaybackTargetTime
 } from './features/timeline/camera-sync.js';
+import { getOverlayStateAtTime as _getOverlayStateAtTime } from './features/timeline/overlay-utils.js';
+import type { OverlayState } from './features/timeline/overlay-utils.js';
 import {
-  getOverlayStateAtTime as _getOverlayStateAtTime,
-  applyOverlayTrimDelta as _applyOverlayTrimDelta
-} from './features/timeline/overlay-utils.js';
-import type { OverlayState, OverlayTrimSnapshot, OverlayTrimContext } from './features/timeline/overlay-utils.js';
+  getEffectiveCanvasDimensions,
+  updatePreview
+} from './features/drawing/compositing.js';
 import {
-  lookupSmoothedMouseAt
-} from './features/timeline/mouse-trail.js';
+  clampSectionZoom,
+  setOutputMode,
+  updateOutputModeUI,
+  getZoomCropBounds,
+  resolveZoomCrop
+} from './features/editor/zoom-crop.js';
 import { cleanupAllMedia } from './features/media-cleanup.js';
-import type { MouseTrailData, MouseTrailEntry } from '../shared/types/mouse-trail.js';
+import {
+  cleanupVideoPool,
+  getOrCreateTakeVideos,
+  loadMouseTrail,
+  pathToFileUrl,
+  syncContentProtection
+} from './features/media/take-media.js';
+import { setWorkspaceView, updateWorkspaceHeader } from './features/workspace/workspace.js';
+import { pickAndLoadBackground } from './features/background/background-image.js';
 import type {
   Section,
   Keyframe,
   Overlay,
   AudioOverlay,
-  OverlayPosition,
   OutputMode,
   PipSnapPoint,
-  SavedKeyframeState,
-  Take,
-  Project,
-  ProjectTimeline,
+  Take
 } from '../shared/types/domain.js';
-import type { RecoveryTake, RecentProjectsResult } from '../shared/types/services.js';
+import {
+  generateAudioOverlayId,
+  normalizePipScale,
+  normalizeExportAudioPreset
+} from '../shared/domain/project-fields.js';
+import {
+  CANVAS_W,
+  CANVAS_H,
+  PIP_MARGIN,
+  PIP_SIZE,
+  REEL_CANVAS_W,
+  REEL_CANVAS_H,
+  DEFAULT_PIP_SCALE,
+  MIN_PIP_SCALE,
+  MAX_PIP_SCALE,
+  getContentWidth
+} from '../shared/domain/canvas.js';
+import {
+  getSnapPointPosition,
+  snapToNearest,
+  computePipSize
+} from './features/geometry/pip-geometry.js';
+import {
+  clampSectionPan,
+  clampReelCropX,
+  reelCropXToPixelOffset
+} from './features/geometry/section-geometry.js';
+import { createOverlaysFromWindowPaths } from './features/overlay/window-overlays.js';
+import {
+  centerSelectedOverlay,
+  deleteSelectedOverlay,
+  handleOverlayDrop,
+  placeOverlayAtTime,
+  renderOverlayMarkers,
+  selectOverlay,
+  splitOverlayAtPlayhead,
+  startOverlayTrimDrag,
+  updateOverlaySizeControl
+} from './features/overlay/overlay.js';
+import {
+  selectAudioOverlay,
+  renderAudioOverlayMarkers,
+  startAudioOverlayTrimDrag,
+  splitAudioOverlayAtPlayhead,
+  deleteSelectedAudioOverlay,
+  placeAudioOverlayAtTime
+} from './features/audio-overlay/audio-overlay.js';
+import {
+  projectHomeView,
+  newProjectNameInput,
+  createProjectBtn,
+  openProjectBtn,
+  resumeLastBtn,
+  recentProjectsList,
+  saveAndCleanBtn,
+  activeProjectPathEl,
+  goRecordingBtn,
+  goTimelineBtn,
+  switchProjectBtn,
+  exportAudioPresetSelect,
+  cameraSyncOffsetInput,
+  screenSelect,
+  screenPickerBtn,
+  screenPickerPanel,
+  screenFitSelect,
+  cameraSelect,
+  audioSelect,
+  recordBtn,
+  openFolderBtn,
+  pickFolderBtn,
+  contentProtectionToggle,
+  transcriptContent,
+  processingTitle,
+  processingStatus,
+  editorCanvas,
+  editorRenderBtn,
+  editorUndoBtn,
+  editorRedoBtn,
+  editorPlayBtn,
+  editorSplitBtn,
+  editorToggleCamBtn,
+  editorCamFullBtn,
+  editorBgZoomInput,
+  editorBgZoomValue,
+  editorApplyFutureBtn,
+  editorModeLandscapeBtn,
+  editorModeReelBtn,
+  editorPipSizeInput,
+  editorPipSizeValue,
+  editorAutoTrackToggle,
+  editorAutoTrackSmoothScrub,
+  editorAutoTrackSmoothValue,
+  editorAutoTrackSmoothInput,
+  editorOverlaySizeInput,
+  editorOverlaySizeValue,
+  editorOverlaySizeScrub,
+  sidebarTabSegments,
+  sidebarTabOverlays,
+  editorCropLeftBtn,
+  editorCropCenterBtn,
+  editorCropRightBtn,
+  editorTimelineWrapper,
+  editorTimeline,
+  editorAudioTrack0,
+  editorBgZoomScrub,
+  editorPipSizeScrub
+} from './features/dom/elements.js';
+import {
+  renderPickerPanel,
+  populatePickerSources,
+  updateScreenStream,
+  updateCameraStream,
+  updateAudioStream
+} from './features/capture/source-picker.js';
+import {
+  stopAudioMeter,
+  toggleRecording,
+  setProcessingProgress
+} from './features/recording/recording.js';
+import {
+  hasPendingEditorDraw,
+  cancelEditorDrawLoop,
+  scheduleEditorDrawLoop,
+  getStateAtTime,
+  getOverlayStateAtTime,
+  getTimelineBoundaries,
+  updateEditorTimeDisplay,
+  editorTogglePlay,
+  cyclePlaybackSpeed,
+  editorSeek
+} from './features/editor/transport.js';
+import {
+  findSectionForTime,
+  getSelectedSection,
+  getSectionBackgroundPan,
+  updateSectionZoomControls,
+  getSectionAnchorKeyframe,
+  syncSectionAnchorKeyframes,
+  selectEditorSection,
+  applyStyleToFutureSections,
+  switchSidebarTab,
+  renderSectionMarkers,
+  deleteSelectedSection,
+  splitSectionAtPlayhead,
+  splitAllAtPlayhead,
+  setSelectedSectionBackgroundZoom,
+  setSectionBackgroundPan,
+  commitSectionZoomChange
+} from './features/section/section-editing.js';
+import {
+  activateProject,
+  clearProjectHomeMessage,
+  editorRedo,
+  editorUndo,
+  flushScheduledProjectSave,
+  matchesActiveProjectSession,
+  openProjectByPath,
+  persistProjectNow,
+  pushUndo,
+  refreshRecentProjects,
+  scheduleProjectSave,
+  showProjectHomeMessage,
+  updateUndoRedoButtons
+} from './features/project/project-lifecycle.js';
+import {
+  applySegmentDeletedStyle,
+  captureThumbnailFrame,
+  handleRenderProgress,
+  renderVideo,
+  selectSegment,
+  updateProxyProgressBars,
+  updateSegmentBadge
+} from './features/render/render.js';
+import {
+  applyTimelineZoom,
+  canvasToEditorCoords,
+  extractWaveformPeaks,
+  initScrubDrag,
+  renderWaveform,
+  seekFromTimeline,
+  setCropPreset,
+  startTrimDrag,
+  toggleCameraFullscreen,
+  toggleCameraVisibility
+} from './features/editor/interactions.js';
+
+import {
+  AUDIO_OVERLAY_EXTENSIONS,
+  DEFAULT_SECTION_ZOOM,
+  MAX_SECTION_ZOOM,
+  MIN_REEL_SECTION_ZOOM,
+  MIN_SECTION_ZOOM,
+  activeProject,
+  activeProjectPath,
+  activeWorkspaceView,
+  audioContext,
+  audioSendInterval,
+  audioStream,
+  autoTrackSmoothDragActive,
+  backgroundDragMoved,
+  backgroundDragState,
+  cameraStream,
+  cropDragMoved,
+  cropDragState,
+  draggingBackground,
+  draggingCrop,
+  draggingOverlay,
+  draggingPip,
+  drawRAF,
+  editorState,
+  mediaIdleTimer,
+  meterRAF,
+  overlayDragMoved,
+  overlayDragOrigX,
+  overlayDragOrigY,
+  overlayDragStartX,
+  overlayDragStartY,
+  overlayResizeAspect,
+  overlayResizeCorner,
+  overlayResizeOrigRect,
+  overlayResizeStartX,
+  overlaySizeDragActive,
+  overlayTrackEls,
+  pipDragMoved,
+  pipSizeDragActive,
+  proxyStatus,
+  recorders,
+  recording,
+  resizingOverlay,
+  screenRecInterval,
+  screenStream,
+  scribeWorkletNode,
+  scribeWs,
+  sectionZoomDragActive,
+  selectedSegmentIndex,
+  speechSegments,
+  takeVideoPool,
+  timelineZoom,
+  timerInterval,
+  undoStack,
+  windowRecIntervals,
+  windowStreams,
+  setActivePlaybackSection,
+  setActiveTakeId,
+  setAudioContext,
+  setAudioSendInterval,
+  setAudioStream,
+  setAutoTrackSmoothDragActive,
+  setBackgroundDragMoved,
+  setBackgroundDragState,
+  setCameraStream,
+  setCropDragMoved,
+  setCropDragState,
+  setDraggingBackground,
+  setDraggingCrop,
+  setDraggingOverlay,
+  setDraggingPip,
+  setDrawRAF,
+  setEditorState,
+  setHideFromRecording,
+  setMediaIdleTimer,
+  setMeterRAF,
+  setOverlayDragMoved,
+  setOverlayDragOrigX,
+  setOverlayDragOrigY,
+  setOverlayDragStartX,
+  setOverlayDragStartY,
+  setOverlayResizeAspect,
+  setOverlayResizeCorner,
+  setOverlayResizeOrigRect,
+  setOverlayResizeStartX,
+  setOverlaySizeDragActive,
+  setPipDragMoved,
+  setPipSizeDragActive,
+  setRecorders,
+  setRecording,
+  setResizingOverlay,
+  setScreenRecInterval,
+  setScreenStream,
+  setScribeWorkletNode,
+  setScribeWs,
+  setSectionZoomDragActive,
+  setTimelineZoom,
+  setWaveformPeaks
+} from './state.js';
+import type { EditorState } from './state.js';
 
 // ── Local interfaces ────────────────────────────────────────────────
-
-interface EditorState {
-  duration: number;
-  currentTime: number;
-  playing: boolean;
-  pipSize: number;
-  defaultPipX: number;
-  defaultPipY: number;
-  keyframes: Keyframe[];
-  sections: Section[];
-  savedSections: Section[];
-  selectedSectionId: string | null;
-  screenFitMode: string;
-  rendering: boolean;
-  renderProgress: number;
-  playbackSpeed: number;
-  cameraSyncOffsetMs: number;
-  hasCamera: boolean;
-  sourceWidth: number | null;
-  sourceHeight: number | null;
-  outputMode: OutputMode;
-  pipScale: number;
-  overlays: Overlay[];
-  savedOverlays: Overlay[];
-  selectedOverlayId: string | null;
-  audioOverlays: AudioOverlay[];
-  savedAudioOverlays: AudioOverlay[];
-  selectedAudioOverlayId: string | null;
-}
-
-interface TakeVideos {
-  screen: HTMLVideoElement;
-  camera: HTMLVideoElement | null;
-}
-
-interface TimelineSnapshot {
-  sections: Section[];
-  savedSections: Section[];
-  keyframes: Keyframe[];
-  overlays: Overlay[];
-  savedOverlays: Overlay[];
-  selectedOverlayId: string | null;
-  audioOverlays: AudioOverlay[];
-  savedAudioOverlays: AudioOverlay[];
-  selectedAudioOverlayId: string | null;
-  selectedSectionId: string | null;
-  duration: number;
-  outputMode: OutputMode;
-}
-
-interface VisualState {
-  pipX: number;
-  pipY: number;
-  pipVisible: boolean;
-  opacity: number;
-  cameraFullscreen: boolean;
-  camTransition: number;
-  backgroundZoom: number;
-  backgroundPanX: number;
-  backgroundPanY: number;
-  backgroundFocusX: number;
-  backgroundFocusY: number;
-  reelCropX: number;
-  pipScale: number;
-  pipSnapPoint: PipSnapPoint;
-  autoTrack: boolean;
-  autoTrackSmoothing: number;
-}
-
-interface ProxyEntry {
-  status: 'pending' | 'done' | 'error';
-  percent?: number;
-}
-
-interface TrimDragState {
-  sectionId: string;
-  edge: string;
-  originalSourceStart: number;
-  originalSourceEnd: number;
-  originalStart: number;
-  originalEnd: number;
-  startMouseX: number;
-  pixelsPerSecond: number;
-  overlaySnapshots: OverlayTrimSnapshot[];
-  audioOverlaySnapshots: OverlayTrimSnapshot[];
-}
-
-interface BackgroundDragState {
-  sectionId: string;
-  startMouseX: number;
-  startMouseY: number;
-  startPanX: number;
-  startPanY: number;
-  zoom: number;
-}
-
-interface CropDragState {
-  sectionId: string;
-  startMouseX: number;
-  startCropX: number;
-  zoom: number;
-}
-
-interface OverlayTrimDragState {
-  overlayId: string;
-  edge: string;
-  startX: number;
-  originalStartTime: number;
-  originalEndTime: number;
-  originalSourceStart: number;
-  originalSourceEnd: number;
-}
-
-interface SpeechSegment {
-  start: number;
-  end: number;
-  text: string;
-  deleted?: boolean;
-}
 
 interface EnterEditorOpts {
   duration?: number;
@@ -191,7 +351,13 @@ interface AppendTakeOpts {
   takeId: string;
   screenPath: string;
   cameraPath: string | null;
-  windowPaths: Array<{ name: string; path: string; width?: number; height?: number; proxyPath?: string | null }> | null;
+  windowPaths: Array<{
+    name: string;
+    path: string;
+    width?: number;
+    height?: number;
+    proxyPath?: string | null;
+  }> | null;
   recordedDuration: number;
   trimSections: Section[];
   projectSession: { id: number; projectPath: string };
@@ -203,7584 +369,1856 @@ interface AppendTakeResult {
   appendedSections: Section[];
 }
 
-type AppMediaRecorder = MediaRecorder & { blobPromise: Promise<{ blob: Blob; path: string }>; suffix: string };
-
 // ── DOM elements ────────────────────────────────────────────────────
 
-    const projectHomeView = document.getElementById('projectHomeView')!;
-    const workspaceHeader = document.getElementById('workspaceHeader')!;
-    const newProjectNameInput = document.getElementById('newProjectName') as HTMLInputElement;
-    const createProjectBtn = document.getElementById('createProjectBtn') as HTMLButtonElement;
-    const openProjectBtn = document.getElementById('openProjectBtn') as HTMLButtonElement;
-    const projectHomeMessage = document.getElementById('projectHomeMessage')!;
-    const lastProjectRow = document.getElementById('lastProjectRow')!;
-    const lastProjectName = document.getElementById('lastProjectName')!;
-    const lastProjectPath = document.getElementById('lastProjectPath')!;
-    const resumeLastBtn = document.getElementById('resumeLastBtn') as HTMLButtonElement;
-    const recentProjectsList = document.getElementById('recentProjectsList')!;
-    const saveAndCleanBtn = document.getElementById('saveAndCleanBtn') as HTMLButtonElement;
-    const activeProjectNameEl = document.getElementById('activeProjectName')!;
-    const activeProjectPathEl = document.getElementById('activeProjectPath')!;
-    const goRecordingBtn = document.getElementById('goRecordingBtn') as HTMLButtonElement;
-    const goTimelineBtn = document.getElementById('goTimelineBtn') as HTMLButtonElement;
-    const switchProjectBtn = document.getElementById('switchProjectBtn') as HTMLButtonElement;
-    const exportAudioPresetControl = document.getElementById('exportAudioPresetControl')!;
-    const exportAudioPresetSelect = document.getElementById('exportAudioPreset') as HTMLSelectElement;
-    const cameraSyncOffsetControl = document.getElementById('cameraSyncOffsetControl')!;
-    const cameraSyncOffsetInput = document.getElementById('cameraSyncOffsetMs') as HTMLInputElement;
+if (typeof window.electronAPI.onRenderProgress === 'function') {
+  window.electronAPI.onRenderProgress((update) => {
+    handleRenderProgress(update);
+  });
+}
 
-    const screenSelect = document.getElementById('screenSource') as HTMLSelectElement;
-    const screenPickerBtn = document.getElementById('screenPickerBtn')!;
-    const screenPickerPanel = document.getElementById('screenPickerPanel')!;
-    const screenPickerSingleZone = document.getElementById('screenPickerSingleZone')!;
-    const screenPickerWindowZone = document.getElementById('screenPickerWindowZone')!;
-    const screenPickerDeviceZone = document.getElementById('screenPickerDeviceZone')!;
-    const screenFitSelect = document.getElementById('screenFit') as HTMLSelectElement;
-    const cameraSelect = document.getElementById('cameraSource') as HTMLSelectElement;
-    const audioSelect = document.getElementById('audioSource') as HTMLSelectElement;
-    const canvas = document.getElementById('compositeCanvas') as HTMLCanvasElement;
-    const ctx = canvas.getContext('2d')!;
-    const screenVideo = document.getElementById('screenVideo') as HTMLVideoElement;
-    const cameraVideo = document.getElementById('cameraVideo') as HTMLVideoElement;
-    const noPreview = document.getElementById('noPreview')!;
-    const audioMeter = document.getElementById('audioMeter')!;
-    const recordBtn = document.getElementById('recordBtn') as HTMLButtonElement;
-    const timerEl = document.getElementById('timer')!;
-    const folderPathEl = document.getElementById('folderPath')!;
-    const openFolderBtn = document.getElementById('openFolderBtn') as HTMLButtonElement;
-    const pickFolderBtn = document.getElementById('pickFolderBtn') as HTMLButtonElement;
-    const contentProtectionToggle = document.getElementById('contentProtectionToggle') as HTMLInputElement;
-    const recordingView = document.getElementById('recordingView')!;
-    const transcriptPanel = document.getElementById('transcriptPanel')!;
-    const transcriptContent = document.getElementById('transcriptContent')!;
-    const segmentBadge = document.getElementById('segmentBadge')!;
-    const processingView = document.getElementById('processingView')!;
-    const processingTitle = document.getElementById('processingTitle')!;
-    const processingStatus = document.getElementById('processingStatus')!;
-    const processingBar = document.getElementById('processingBar')!;
-
-    // Editor DOM refs
-    const editorView = document.getElementById('editorView')!;
-    const editorCanvas = document.getElementById('editorCanvas') as HTMLCanvasElement;
-    const editorCtx = editorCanvas.getContext('2d')!;
-    const editorRenderBtn = document.getElementById('editorRenderBtn') as HTMLButtonElement;
-    const editorUndoBtn = document.getElementById('editorUndoBtn') as HTMLButtonElement;
-    const editorRedoBtn = document.getElementById('editorRedoBtn') as HTMLButtonElement;
-    const editorPlayBtn = document.getElementById('editorPlayBtn') as HTMLButtonElement;
-    const editorSplitBtn = document.getElementById('editorSplitBtn') as HTMLButtonElement;
-    const editorToggleCamBtn = document.getElementById('editorToggleCamBtn') as HTMLButtonElement;
-    const editorCamFullBtn = document.getElementById('editorCamFullBtn') as HTMLButtonElement;
-    const editorBgZoomInput = document.getElementById('editorBgZoomInput') as HTMLInputElement;
-    const editorBgZoomValue = document.getElementById('editorBgZoomValue')!;
-    const editorApplyFutureBtn = document.getElementById('editorApplyFutureBtn') as HTMLButtonElement;
-    const editorModeLandscapeBtn = document.getElementById('editorModeLandscape') as HTMLButtonElement | null;
-    const editorModeReelBtn = document.getElementById('editorModeReel') as HTMLButtonElement | null;
-    const editorPipSizeControl = document.getElementById('editorPipSizeControl');
-    const editorPipSizeInput = document.getElementById('editorPipSizeInput') as HTMLInputElement | null;
-    const editorPipSizeValue = document.getElementById('editorPipSizeValue');
-    const editorAutoTrackControl = document.getElementById('editorAutoTrackControl');
-    const editorAutoTrackToggle = document.getElementById('editorAutoTrackToggle') as HTMLButtonElement | null;
-    const editorAutoTrackSmoothScrub = document.getElementById('editorAutoTrackSmoothScrub');
-    const editorAutoTrackSmoothValue = document.getElementById('editorAutoTrackSmoothValue');
-    const editorAutoTrackSmoothInput = document.getElementById('editorAutoTrackSmoothInput') as HTMLInputElement | null;
-    const editorOverlaySizeControl = document.getElementById('editorOverlaySizeControl');
-    const editorOverlaySizeInput = document.getElementById('editorOverlaySizeInput') as HTMLInputElement;
-    const editorOverlaySizeValue = document.getElementById('editorOverlaySizeValue')!;
-    const editorOverlaySizeScrub = document.getElementById('editorOverlaySizeScrub');
-    const sidebarTabSegments = document.getElementById('sidebarTabSegments');
-    const sidebarTabOverlays = document.getElementById('sidebarTabOverlays');
-    const editorOverlayList = document.getElementById('editorOverlayList');
-    const editorCropPresets = document.getElementById('editorCropPresets');
-    const editorCropLeftBtn = document.getElementById('editorCropLeft');
-    const editorCropCenterBtn = document.getElementById('editorCropCenter');
-    const editorCropRightBtn = document.getElementById('editorCropRight');
-    const editorTimeEl = document.getElementById('editorTime')!;
-    const editorTimelineWrapper = document.getElementById('editorTimelineWrapper')!;
-    const editorTimeline = document.getElementById('editorTimeline')!;
-    const editorSectionMarkers = document.getElementById('editorSectionMarkers')!;
-    const editorOverlayTrack0 = document.getElementById('editorOverlayTrack0')!;
-    const editorOverlayTrack1 = document.getElementById('editorOverlayTrack1')!;
-    const editorOverlayTrack2 = document.getElementById('editorOverlayTrack2')!;
-    const editorOverlayTrack3 = document.getElementById('editorOverlayTrack3')!;
-    const overlayTrackEls = [editorOverlayTrack0, editorOverlayTrack1, editorOverlayTrack2, editorOverlayTrack3];
-    const editorScrubber = document.getElementById('editorScrubber')!;
-    const editorSectionTranscriptList = document.getElementById('editorSectionTranscriptList')!;
-    let editorRenderTimeout: ReturnType<typeof setTimeout> | null = null;
-    const editorWaveformCanvas = document.getElementById('editorWaveformCanvas') as HTMLCanvasElement;
-
-    let screenStream: MediaStream | null = null;
-    let cameraStream: MediaStream | null = null;
-    let audioStream: MediaStream | null = null;
-    let recorders: AppMediaRecorder[] = [];
-    let recording = false;
-    let screenRecInterval: ReturnType<typeof setInterval> | null = null;
-    let timerInterval: ReturnType<typeof setInterval> | null = null;
-    let mouseTrailSamples: MouseTrailEntry[] = [];
-    let mouseTrailCaptureWidth: number | null = null;
-    let mouseTrailCaptureHeight: number | null = null;
-    let startTime = 0;
-    let audioContext: AudioContext | null = null;
-    let analyser: AnalyserNode | null = null;
-    let meterRAF: number | null = null;
-    let drawRAF: number | null = null;
-    let saveFolder = '';
-    let hideFromRecording = 'true';
-    let activeProjectPath = '';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- project shape is loose at runtime
-    let activeProject: any = null;
-    let activeProjectSession = 0;
-    let activeWorkspaceView = 'home';
-    let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-    let persistQueue: Promise<void> = Promise.resolve();
-    let mediaInitialized = false;
-    let scribeWs: WebSocket | null = null;
-    let scribeWorkletNode: AudioWorkletNode | null = null;
-    let mediaIdleTimer: ReturnType<typeof setTimeout> | null = null;
-    const MEDIA_IDLE_TIMEOUT_MS = 30000;
-    let speechSegments: SpeechSegment[] = [];
-    let audioChunkBuffer: Int16Array[] = [];
-    let audioSendInterval: ReturnType<typeof setInterval> | null = null;
-    let micSourceNode: MediaStreamAudioSourceNode | null = null;
-
-    // Window capture state
-    let windowStreams: MediaStream[] = [];
-    let windowVideos: HTMLVideoElement[] = [];
-    let windowRecIntervals: ReturnType<typeof setInterval>[] = [];
-    let windowSourceNames: string[] = [];
-    let backgroundImage: HTMLImageElement | null = null;
-    let backgroundImagePath: string | null = null;
-
-    function handleRenderProgress(update: { percent?: number | null; status?: string }) {
-      if (!editorState || !editorState.rendering) return;
-
-      const percent = Number.isFinite(Number(update?.percent))
-        ? Math.max(0, Math.min(1, Number(update.percent)))
-        : null;
-      editorState.renderProgress = percent ?? 0;
-
-      processingTitle.textContent = 'Rendering export...';
-      processingStatus.textContent = typeof update?.status === 'string' && update.status ? update.status : 'Rendering...';
-      setProcessingProgress(percent);
-
-      if (percent === null) {
-        setRenderBtnState(processingStatus.textContent, 'busy');
-        return;
+if (typeof window.electronAPI.onProxyProgress === 'function') {
+  window.electronAPI.onProxyProgress((payload) => {
+    if (!payload || !payload.takeId) return;
+    if (payload.status === 'progress') {
+      const current = proxyStatus.get(payload.takeId);
+      if (current && current.status === 'pending') {
+        current.percent = payload.percent || 0;
+        updateProxyProgressBars(payload.takeId, current.percent);
       }
+    } else if (payload.status === 'done' && payload.proxyPath) {
+      proxyStatus.set(payload.takeId, { status: 'done' });
 
-      setRenderBtnState(`Rendering ${Math.round(percent * 100)}%`, 'busy');
-    }
-
-    if (typeof window.electronAPI.onRenderProgress === 'function') {
-      window.electronAPI.onRenderProgress((update) => {
-        handleRenderProgress(update);
-      });
-    }
-
-    if (typeof window.electronAPI.onProxyProgress === 'function') {
-      window.electronAPI.onProxyProgress((payload) => {
-        if (!payload || !payload.takeId) return;
-        if (payload.status === 'progress') {
-          const current = proxyStatus.get(payload.takeId);
-          if (current && current.status === 'pending') {
-            current.percent = payload.percent || 0;
-            updateProxyProgressBars(payload.takeId, current.percent);
+      // Check if this is a window proxy (takeId format: "take-xxx-win0")
+      const winProxyMatch = (payload.takeId as string).match(/^(.+)-win(\d+)$/);
+      if (winProxyMatch) {
+        const realTakeId = winProxyMatch[1]!;
+        const winIdx = parseInt(winProxyMatch[2]!, 10);
+        const take = activeProject?.takes?.find((t: Take) => t.id === realTakeId);
+        if (take && Array.isArray(take.windowPaths) && take.windowPaths[winIdx]) {
+          take.windowPaths[winIdx]!.proxyPath = payload.proxyPath;
+          // Also update any window overlay that uses this media path
+          if (editorState) {
+            const wp = take.windowPaths[winIdx]!;
+            for (const ov of editorState.overlays) {
+              if (ov.mediaType === 'window' && ov.mediaPath === wp.path) {
+                ov.proxyPath = payload.proxyPath;
+              }
+            }
           }
-        } else if (payload.status === 'done' && payload.proxyPath) {
-          proxyStatus.set(payload.takeId, { status: 'done' });
-
-          // Check if this is a window proxy (takeId format: "take-xxx-win0")
-          const winProxyMatch = (payload.takeId as string).match(/^(.+)-win(\d+)$/);
-          if (winProxyMatch) {
-            const realTakeId = winProxyMatch[1]!;
-            const winIdx = parseInt(winProxyMatch[2]!, 10);
-            const take = activeProject?.takes?.find((t: Take) => t.id === realTakeId);
-            if (take && Array.isArray(take.windowPaths) && take.windowPaths[winIdx]) {
-              take.windowPaths[winIdx]!.proxyPath = payload.proxyPath;
-              // Also update any window overlay that uses this media path
-              if (editorState) {
-                const wp = take.windowPaths[winIdx]!;
-                for (const ov of editorState.overlays) {
-                  if (ov.mediaType === 'window' && ov.mediaPath === wp.path) {
-                    ov.proxyPath = payload.proxyPath;
-                  }
-                }
-              }
-              persistProjectNow().catch((err: unknown) => console.warn('[Proxy] Failed to persist window proxyPath:', err));
-            }
-            // Also hot-swap the take screen video if it was using win0
-            if (winIdx === 0) {
-              const cached = takeVideoPool.get(realTakeId);
-              if (cached) {
-                const wasPlaying = !cached.screen.paused;
-                const currentTime = cached.screen.currentTime;
-                const rate = cached.screen.playbackRate;
-                cached.screen.src = pathToFileUrl(payload.proxyPath!);
-                cached.screen.addEventListener('loadedmetadata', () => {
-                  cached.screen.currentTime = currentTime;
-                  if (wasPlaying) {
-                    cached.screen.playbackRate = rate;
-                    cached.screen.play().catch(() => {});
-                    if (!hasPendingEditorDraw()) scheduleEditorDrawLoop();
-                  }
-                }, { once: true });
-              }
-            }
-          } else {
-            // Standard screen proxy
-            const take = activeProject?.takes?.find((t: Take) => t.id === payload.takeId);
-            if (take) {
-              take.proxyPath = payload.proxyPath;
-              persistProjectNow().catch((err: unknown) => console.warn('[Proxy] Failed to persist proxyPath:', err));
-            }
-            // Hot-swap the cached video element to use the proxy
-            const cached = takeVideoPool.get(payload.takeId);
-            if (cached) {
-              const wasPlaying = !cached.screen.paused;
-              const currentTime = cached.screen.currentTime;
-              const rate = cached.screen.playbackRate;
-              cached.screen.src = pathToFileUrl(payload.proxyPath!);
-              cached.screen.addEventListener('loadedmetadata', () => {
+          persistProjectNow().catch((err: unknown) =>
+            console.warn('[Proxy] Failed to persist window proxyPath:', err)
+          );
+        }
+        // Also hot-swap the take screen video if it was using win0
+        if (winIdx === 0) {
+          const cached = takeVideoPool.get(realTakeId);
+          if (cached) {
+            const wasPlaying = !cached.screen.paused;
+            const currentTime = cached.screen.currentTime;
+            const rate = cached.screen.playbackRate;
+            cached.screen.src = pathToFileUrl(payload.proxyPath!);
+            cached.screen.addEventListener(
+              'loadedmetadata',
+              () => {
                 cached.screen.currentTime = currentTime;
                 if (wasPlaying) {
                   cached.screen.playbackRate = rate;
                   cached.screen.play().catch(() => {});
                   if (!hasPendingEditorDraw()) scheduleEditorDrawLoop();
                 }
-              }, { once: true });
-            }
-          }
-          renderSectionMarkers();
-        } else if (payload.status === 'error') {
-          proxyStatus.set(payload.takeId, { status: 'error' });
-          console.warn('[Proxy] Generation failed for take', payload.takeId, payload.error);
-          renderSectionMarkers();
-        }
-      });
-    }
-    let scribeAudioOffset = 0; // seconds between recording start and first audio sent to Scribe
-    let workletRegistered: AudioContext | null = null; // tracks which AudioContext has the worklet registered
-
-    const CANVAS_W = 1920;
-    const CANVAS_H = 1080;
-    const PIP_FRACTION = 0.22;
-    const PIP_MARGIN = 20;
-    const PIP_SIZE = Math.round(CANVAS_W * PIP_FRACTION);
-    let overlayIdCounter = 0;
-    function generateOverlayId(): string {
-      overlayIdCounter += 1;
-      return `overlay-${Date.now()}-${overlayIdCounter}`;
-    }
-    let audioOverlayIdCounter = 0;
-    function generateAudioOverlayId(): string {
-      audioOverlayIdCounter += 1;
-      return `audio-overlay-${Date.now()}-${audioOverlayIdCounter}`;
-    }
-    const AUDIO_OVERLAY_EXTENSIONS = ['.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a'];
-
-    function createOverlaysFromWindowPaths(
-      windowPaths: Array<{ name: string; path: string; width?: number; height?: number; proxyPath?: string | null }>,
-      duration: number
-    ): Overlay[] {
-      return windowPaths.slice(0, 2).map((wp, idx) => {
-        const srcW = wp.width || CANVAS_W;
-        const srcH = wp.height || CANVAS_H;
-
-        // Landscape positioning — matches recording preview (drawComposite)
-        let lw: number, lh: number, lx: number, ly: number;
-        if (windowPaths.length === 1) {
-          // Single window: fit to full canvas (same as drawFitRounded(0,0,CANVAS_W,CANVAS_H))
-          const scale = Math.min(CANVAS_W / srcW, CANVAS_H / srcH);
-          lw = srcW * scale;
-          lh = srcH * scale;
-          lx = (CANVAS_W - lw) / 2;
-          ly = (CANVAS_H - lh) / 2;
-        } else {
-          // Two windows: side by side with gap (same as drawComposite's 2-window layout)
-          const gap = 16;
-          const halfW = (CANVAS_W - gap) / 2;
-          const scale = Math.min(halfW / srcW, CANVAS_H / srcH);
-          lw = srcW * scale;
-          lh = srcH * scale;
-          lx = idx === 0
-            ? (halfW - lw) / 2
-            : halfW + gap + (halfW - lw) / 2;
-          ly = (CANVAS_H - lh) / 2;
-        }
-
-        // Reel starts identical to landscape — user can adjust per mode later
-        const landscapePos = { x: Math.round(lx), y: Math.round(ly), width: Math.round(lw), height: Math.round(lh) };
-
-        return {
-          id: generateOverlayId(),
-          trackIndex: idx,
-          mediaPath: wp.path,
-          mediaType: 'window' as const,
-          startTime: 0,
-          endTime: duration,
-          sourceStart: 0,
-          sourceEnd: duration,
-          landscape: landscapePos,
-          reel: { ...landscapePos },
-          saved: false,
-          sourceName: wp.name,
-          sourceWidth: srcW,
-          sourceHeight: srcH,
-          ...(wp.proxyPath ? { proxyPath: wp.proxyPath } : {})
-        };
-      });
-    }
-
-    const MIN_SECTION_ZOOM = 1;
-    const MIN_REEL_SECTION_ZOOM = 0.5;
-    const MAX_SECTION_ZOOM = 3;
-    const DEFAULT_SECTION_ZOOM = 1;
-    const MIN_SECTION_PAN = -1;
-    const MAX_SECTION_PAN = 1;
-    const EXPORT_AUDIO_PRESET_OFF = 'off';
-    const EXPORT_AUDIO_PRESET_COMPRESSED = 'compressed';
-    const REEL_CANVAS_W = Math.round(CANVAS_H * 9 / 16);
-    const REEL_CANVAS_H = CANVAS_H;
-    const MIN_REEL_CROP_X = -1;
-    const MAX_REEL_CROP_X = 1;
-    const DEFAULT_PIP_SCALE = 0.22;
-    const MIN_PIP_SCALE = 0.15;
-    const MAX_PIP_SCALE = 0.50;
-    const MODE_SPECIFIC_PROPS: (keyof SavedKeyframeState)[] = [
-      'backgroundZoom', 'backgroundPanX', 'backgroundPanY',
-      'pipX', 'pipY', 'pipScale', 'pipVisible', 'cameraFullscreen', 'reelCropX', 'pipSnapPoint',
-      'autoTrack', 'autoTrackSmoothing'
-    ];
-
-    function normalizePipScale(value: unknown): number {
-      if (value === null || value === undefined) return DEFAULT_PIP_SCALE;
-      const v = Number(value);
-      if (!Number.isFinite(v)) return DEFAULT_PIP_SCALE;
-      return Math.max(MIN_PIP_SCALE, Math.min(MAX_PIP_SCALE, v));
-    }
-
-    function getSnapPointPosition(snapPoint: string, w: number, h: number, ps: number): { x: number; y: number } {
-      const midX = Math.round((w - ps) / 2);
-      const midY = Math.round((h - ps) / 2);
-      switch (snapPoint) {
-        case 'tl': return { x: PIP_MARGIN, y: PIP_MARGIN };
-        case 'tc': return { x: midX, y: PIP_MARGIN };
-        case 'tr': return { x: w - ps - PIP_MARGIN, y: PIP_MARGIN };
-        case 'ml': return { x: PIP_MARGIN, y: midY };
-        case 'center': return { x: midX, y: midY };
-        case 'mr': return { x: w - ps - PIP_MARGIN, y: midY };
-        case 'bl': return { x: PIP_MARGIN, y: h - ps - PIP_MARGIN };
-        case 'bc': return { x: midX, y: h - ps - PIP_MARGIN };
-        case 'br':
-        default: return { x: w - ps - PIP_MARGIN, y: h - ps - PIP_MARGIN };
-      }
-    }
-
-    function snapToNearest(cursorX: number, cursorY: number, effectiveW: number, effectiveH: number, pipSize: number): { x: number; y: number; snapPoint: string } {
-      const w = effectiveW || CANVAS_W;
-      const h = effectiveH || CANVAS_H;
-      const ps = pipSize || PIP_SIZE;
-      const points = ['tl', 'tc', 'tr', 'ml', 'center', 'mr', 'bl', 'bc', 'br'];
-      let bestDist = Infinity;
-      let bestSnap = 'br';
-      for (const sp of points) {
-        const pos = getSnapPointPosition(sp, w, h, ps);
-        const dx = cursorX - pos.x;
-        const dy = cursorY - pos.y;
-        const dist = dx * dx + dy * dy;
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestSnap = sp;
-        }
-      }
-      const pos = getSnapPointPosition(bestSnap, w, h, ps);
-      return { x: pos.x, y: pos.y, snapPoint: bestSnap };
-    }
-
-    function clampSectionZoom(value: unknown): number {
-      const minZoom = editorState && editorState.outputMode === 'reel' ? MIN_REEL_SECTION_ZOOM : MIN_SECTION_ZOOM;
-      const zoom = Number(value);
-      if (!Number.isFinite(zoom)) return DEFAULT_SECTION_ZOOM;
-      return Math.max(minZoom, Math.min(MAX_SECTION_ZOOM, zoom));
-    }
-
-    function formatSectionZoom(value: unknown): string {
-      return `${clampSectionZoom(value).toFixed(2)}x`;
-    }
-
-    function clampSectionPan(value: unknown): number {
-      const pan = Number(value);
-      if (!Number.isFinite(pan)) return 0;
-      return Math.max(MIN_SECTION_PAN, Math.min(MAX_SECTION_PAN, pan));
-    }
-
-    function clampReelCropX(value: unknown): number {
-      const v = Number(value);
-      if (!Number.isFinite(v)) return 0;
-      return Math.max(MIN_REEL_CROP_X, Math.min(MAX_REEL_CROP_X, v));
-    }
-
-    function getEffectiveCanvasDimensions(): { w: number; h: number } {
-      if (!editorState || editorState.outputMode !== 'reel') return { w: CANVAS_W, h: CANVAS_H };
-      return { w: REEL_CANVAS_W, h: REEL_CANVAS_H };
-    }
-
-    function computePipSize(pipScale: number, effectiveW: number): number {
-      return Math.round(effectiveW * pipScale);
-    }
-
-    function saveModeState(kf: Keyframe, mode: OutputMode): void {
-      const slot: SavedKeyframeState = {};
-      for (const prop of MODE_SPECIFIC_PROPS) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic property copy between compatible shapes
-        (slot as any)[prop] = (kf as any)[prop];
-      }
-      if (mode === 'reel') {
-        kf.savedReel = slot;
-      } else {
-        kf.savedLandscape = slot;
-      }
-    }
-
-    function restoreModeState(kf: Keyframe, mode: OutputMode, defaults: SavedKeyframeState): void {
-      const slotKey = mode === 'reel' ? 'savedReel' : 'savedLandscape';
-      const saved = kf[slotKey];
-      if (saved) {
-        for (const prop of MODE_SPECIFIC_PROPS) {
-          if (prop in saved) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic property copy between compatible shapes
-            (kf as any)[prop] = (saved as any)[prop];
+              },
+              { once: true }
+            );
           }
         }
       } else {
-        for (const prop of MODE_SPECIFIC_PROPS) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic property copy between compatible shapes
-          (kf as any)[prop] = (defaults as any)[prop];
+        // Standard screen proxy
+        const take = activeProject?.takes?.find((t: Take) => t.id === payload.takeId);
+        if (take) {
+          take.proxyPath = payload.proxyPath;
+          persistProjectNow().catch((err: unknown) =>
+            console.warn('[Proxy] Failed to persist proxyPath:', err)
+          );
         }
-      }
-    }
-
-    function getDefaultModeState(mode: OutputMode): SavedKeyframeState {
-      const w = mode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
-      const h = mode === 'reel' ? REEL_CANVAS_H : CANVAS_H;
-      const ps = DEFAULT_PIP_SCALE;
-      const pipSize = computePipSize(ps, w);
-      return {
-        backgroundZoom: 1,
-        backgroundPanX: 0,
-        backgroundPanY: 0,
-        pipX: w - pipSize - PIP_MARGIN,
-        pipY: h - pipSize - PIP_MARGIN,
-        pipScale: ps,
-        pipVisible: true,
-        cameraFullscreen: false,
-        reelCropX: 0,
-        pipSnapPoint: 'br',
-        autoTrack: false,
-        autoTrackSmoothing: 0.15
-      };
-    }
-
-    function getContentWidth(sourceW: number | null, sourceH: number | null, fitMode: string): number {
-      if (fitMode !== 'fit' || !sourceW || !sourceH) return CANVAS_W;
-      const scale = Math.min(CANVAS_W / sourceW, CANVAS_H / sourceH);
-      return sourceW * scale;
-    }
-
-    function reelCropXToPixelOffset(reelCropX: unknown, zoom: unknown, contentW?: number): number {
-      const cw = contentW || CANVAS_W;
-      const z = Math.min(1, Math.max(0, zoom != null ? Number(zoom) : 1));
-      const contentLeft = (CANVAS_W - cw) / 2;
-      const scaledW = cw * z;
-      const scaledLeft = contentLeft + (cw - scaledW) / 2;
-      const maxCropRange = Math.max(0, scaledW - REEL_CANVAS_W);
-      return scaledLeft + ((clampReelCropX(reelCropX) + 1) / 2) * maxCropRange;
-    }
-
-    function setOutputMode(mode: string): void {
-      if (!editorState) return;
-      const newMode: OutputMode = mode === 'reel' ? 'reel' : 'landscape';
-      if (editorState.outputMode === newMode) return;
-      pushUndo();
-
-      const oldMode = editorState.outputMode;
-      const defaults = getDefaultModeState(newMode);
-
-      // Save current mode state, then restore or apply defaults for new mode
-      if (editorState.keyframes) {
-        for (const kf of editorState.keyframes) {
-          saveModeState(kf, oldMode);
-          restoreModeState(kf, newMode, defaults);
-        }
-      }
-
-      editorState.outputMode = newMode;
-
-      const { w, h } = getEffectiveCanvasDimensions();
-      const defaultPs = editorState.pipScale || DEFAULT_PIP_SCALE;
-      editorState.pipSize = computePipSize(defaultPs, w);
-      editorState.defaultPipX = w - editorState.pipSize - PIP_MARGIN;
-      editorState.defaultPipY = h - editorState.pipSize - PIP_MARGIN;
-
-      updateOutputModeUI();
-      scheduleProjectSave();
-    }
-
-    function updateOutputModeUI(): void {
-      if (!editorModeLandscapeBtn || !editorModeReelBtn) return;
-      const isReel = editorState && editorState.outputMode === 'reel';
-      editorModeLandscapeBtn.className = isReel
-        ? 'px-2.5 py-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors'
-        : 'px-2.5 py-1 text-xs bg-white text-black transition-colors';
-      editorModeReelBtn.className = isReel
-        ? 'px-2.5 py-1 text-xs bg-white text-black transition-colors'
-        : 'px-2.5 py-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors';
-      // Show/hide PIP size control when camera is present
-      if (editorPipSizeControl) {
-        const showPipControl = editorState && editorState.hasCamera;
-        editorPipSizeControl.classList.toggle('hidden', !showPipControl);
-        editorPipSizeControl.classList.toggle('flex', !!showPipControl);
-      }
-      if (editorPipSizeInput && editorState) {
-        const selectedSection = getSelectedSection();
-        const sectionAnchor = selectedSection ? getSectionAnchorKeyframe(selectedSection.id, false) : null;
-        const currentPipScale = sectionAnchor ? normalizePipScale(sectionAnchor.pipScale) : (editorState.pipScale || DEFAULT_PIP_SCALE);
-        editorPipSizeInput.value = String(currentPipScale);
-        if (editorPipSizeValue) editorPipSizeValue.textContent = currentPipScale.toFixed(2);
-      }
-      if (editorCropPresets) {
-        editorCropPresets.classList.toggle('hidden', !isReel);
-        editorCropPresets.classList.toggle('flex', !!isReel);
-      }
-      // Update zoom slider range based on mode
-      if (editorBgZoomInput) {
-        editorBgZoomInput.min = isReel ? '0.5' : '1';
-      }
-      updateSectionZoomControls();
-    }
-
-    function normalizeExportAudioPreset(value: unknown): string {
-      return value === EXPORT_AUDIO_PRESET_OFF
-        ? EXPORT_AUDIO_PRESET_OFF
-        : EXPORT_AUDIO_PRESET_COMPRESSED;
-    }
-
-    function getZoomCropBounds(zoom: unknown): { sourceW: number; sourceH: number; maxOffsetX: number; maxOffsetY: number } {
-      const clampedZoom = clampSectionZoom(zoom);
-      const sourceW = CANVAS_W / clampedZoom;
-      const sourceH = CANVAS_H / clampedZoom;
-      return {
-        sourceW,
-        sourceH,
-        maxOffsetX: Math.max(0, (CANVAS_W - sourceW) / 2),
-        maxOffsetY: Math.max(0, (CANVAS_H - sourceH) / 2)
-      };
-    }
-
-    function resolveZoomCrop(zoom: unknown, panX = 0, panY = 0): { sourceW: number; sourceH: number; sourceX: number; sourceY: number; maxOffsetX: number; maxOffsetY: number } {
-      const { sourceW, sourceH, maxOffsetX, maxOffsetY } = getZoomCropBounds(zoom);
-      return {
-        sourceW,
-        sourceH,
-        sourceX: maxOffsetX + clampSectionPan(panX) * maxOffsetX,
-        sourceY: maxOffsetY + clampSectionPan(panY) * maxOffsetY,
-        maxOffsetX,
-        maxOffsetY
-      };
-    }
-
-    function panToFocusCoord(zoom: unknown, pan: unknown, defaultCoord = 0.5): number {
-      const normalizedZoom = clampSectionZoom(zoom);
-      if (normalizedZoom <= 1.0001) return defaultCoord;
-      const cropFraction = 1 / normalizedZoom;
-      return cropFraction / 2 + ((clampSectionPan(pan) + 1) / 2) * (1 - cropFraction);
-    }
-
-    function focusToPanCoord(zoom: unknown, focus: number, defaultPan = 0): number {
-      const normalizedZoom = clampSectionZoom(zoom);
-      if (normalizedZoom <= 1.0001) return defaultPan;
-      const cropFraction = 1 / normalizedZoom;
-      const availableFraction = 1 - cropFraction;
-      if (availableFraction <= 0.000001) return defaultPan;
-      return clampSectionPan((((focus - cropFraction / 2) / availableFraction) * 2) - 1);
-    }
-
-    const TRANSITION_DURATION = 0.3;
-    const CAMERA_DRIFT_SOFT_THRESHOLD = 0.015;
-    const CAMERA_DRIFT_HARD_THRESHOLD = 0.18;
-    const CAMERA_DRIFT_LOG_THRESHOLD = 0.08;
-    const CAMERA_DRIFT_LOG_INTERVAL_MS = 1000;
-    const CAMERA_RESYNC_COOLDOWN_MS = 500;
-
-    canvas.width = CANVAS_W;
-    canvas.height = CANVAS_H;
-    editorCanvas.width = CANVAS_W;
-    editorCanvas.height = CANVAS_H;
-
-    // ===== Editor State =====
-    const undoStack: TimelineSnapshot[] = [];
-    const redoStack: TimelineSnapshot[] = [];
-    const MAX_UNDO = 50;
-    let editorState: EditorState | null = null;
-    let editorDrawRAF: number | null = null;
-    let editorPausedDrawTimer: ReturnType<typeof setTimeout> | null = null;
-    let editorVideoFrameCallbackId: number | null = null;
-    let editorVideoFrameHost: HTMLVideoElement | null = null;
-    let editorVideoFrameSafetyTimer: ReturnType<typeof setTimeout> | null = null;
-    let draggingPip = false;
-    let pipDragMoved = false;
-    let waveformPeaks: Float32Array | null = null;
-    let timelineZoom = 1;
-    let trimDragState: TrimDragState | null = null;
-    let sectionZoomDragActive = false;
-    let draggingBackground = false;
-    let backgroundDragMoved = false;
-    let backgroundDragState: BackgroundDragState | null = null;
-    const takeAudioBufferCache = new Map<string, AudioBuffer>(); // takeId -> AudioBuffer
-    const takeVideoPool = new Map<string, TakeVideos>(); // takeId -> { screen, camera }
-    const proxyStatus = new Map<string, ProxyEntry>(); // takeId -> status entry
-    const overlayImageCache = new Map<string, HTMLImageElement>(); // mediaPath -> HTMLImageElement
-    const mouseTrailCache = new Map<string, MouseTrailData>(); // takeId -> trail data
-    const overlayVideoEls: (HTMLVideoElement | null)[] = [null, null, null, null]; // per-track reusable <video> elements
-    const overlayVideoCurrentPaths: (string | null)[] = [null, null, null, null];
-    let activeTakeId: string | null = null;
-    let activePlaybackSection: Section | null = null;
-    let cameraResyncCooldownUntil = 0;
-    let lastCameraDriftLogAt = 0;
-    let draggingCrop = false;
-    let cropDragMoved = false;
-    let cropDragState: CropDragState | null = null;
-    const editorZoomBuffer = document.createElement('canvas');
-    editorZoomBuffer.width = CANVAS_W;
-    editorZoomBuffer.height = CANVAS_H;
-    const editorZoomBufferCtx = editorZoomBuffer.getContext('2d');
-
-    function getOrCreateTakeVideos(takeId: string): TakeVideos | null {
-      if (takeVideoPool.has(takeId)) return takeVideoPool.get(takeId)!;
-      const take = activeProject?.takes?.find((t: Take) => t.id === takeId);
-      if (!take) return null;
-      const screen = document.createElement('video');
-      screen.playsInline = true;
-      screen.preload = 'auto';
-      // In window capture mode (no screenPath), use first window file as timing source
-      const screenSrc = take.proxyPath || take.screenPath
-        || (Array.isArray(take.windowPaths) && take.windowPaths.length > 0 ? take.windowPaths[0]!.path : null);
-      if (screenSrc) {
-        screen.src = pathToFileUrl(screenSrc);
-      }
-      let camera: HTMLVideoElement | null = null;
-      if (take.cameraPath) {
-        camera = document.createElement('video');
-        camera.playsInline = true;
-        camera.muted = true;
-        camera.preload = 'auto';
-        camera.src = pathToFileUrl(take.cameraPath);
-      }
-      const entry: TakeVideos = { screen, camera };
-      takeVideoPool.set(takeId, entry);
-      return entry;
-    }
-
-    function cleanupVideoPool(): void {
-      for (const [, videos] of takeVideoPool) {
-        videos.screen.pause();
-        videos.screen.src = '';
-        if (videos.camera) {
-          videos.camera.pause();
-          videos.camera.src = '';
-        }
-      }
-      takeVideoPool.clear();
-      takeAudioBufferCache.clear();
-      activeTakeId = null;
-      activePlaybackSection = null;
-    }
-
-    function resolveTimeToSource(timelineTime: number): { takeId: string; sourceTime: number; section: Section } | null {
-      const section = findSectionForTime(timelineTime);
-      if (!section) return null;
-      const sourceTime = section.sourceStart + (timelineTime - section.start);
-      return { takeId: section.takeId!, sourceTime, section };
-    }
-
-    function recalculateTimelinePositions(): void {
-      if (!editorState || !editorState.sections) return;
-      let cursor = 0;
-      for (const section of editorState.sections) {
-        const duration = section.sourceEnd - section.sourceStart;
-        section.start = roundMs(cursor);
-        section.end = roundMs(cursor + duration);
-        section.duration = roundMs(duration);
-        cursor += duration;
-      }
-      editorState.duration = cursor;
-    }
-
-    function easeInOut(t: number): number {
-      return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    }
-
-    function getActiveProjectSession(): { id: number; projectPath: string } {
-      return {
-        id: activeProjectSession,
-        projectPath: activeProjectPath
-      };
-    }
-
-    function matchesActiveProjectSession(session: { id: number; projectPath: string }): boolean {
-      return !!session
-        && session.id === activeProjectSession
-        && session.projectPath === activeProjectPath;
-    }
-
-    function pathToFileUrl(filePath: string | null): string {
-      if (!filePath) return '';
-      return window.electronAPI.pathToFileUrl(filePath);
-    }
-
-    async function loadMouseTrail(takeId: string): Promise<MouseTrailData | null> {
-      if (mouseTrailCache.has(takeId)) return mouseTrailCache.get(takeId)!;
-      const take = activeProject?.takes?.find((t: Take) => t.id === takeId);
-      if (!take?.mousePath) return null;
-      try {
-        const response = await fetch(pathToFileUrl(take.mousePath));
-        const data = await response.json() as MouseTrailData;
-        if (data && Array.isArray(data.trail)) {
-          mouseTrailCache.set(takeId, data);
-          return data;
-        }
-      } catch (err) {
-        console.warn('Failed to load mouse trail:', err);
-      }
-      return null;
-    }
-
-    function getMouseTrailForTake(takeId: string): MouseTrailData | null {
-      return mouseTrailCache.get(takeId) || null;
-    }
-
-    function getOverlayImageElement(mediaPath: string): HTMLImageElement | null {
-      if (overlayImageCache.has(mediaPath)) return overlayImageCache.get(mediaPath)!;
-      if (!activeProjectPath) return null;
-      const img = new Image();
-      img.src = pathToFileUrl(`${activeProjectPath}/${mediaPath}`);
-      overlayImageCache.set(mediaPath, img);
-      return img;
-    }
-
-    function getOverlayVideoElement(mediaPath: string, trackIdx = 0): HTMLVideoElement | null {
-      if (!overlayVideoEls[trackIdx]) {
-        overlayVideoEls[trackIdx] = document.createElement('video');
-        overlayVideoEls[trackIdx]!.muted = true;
-        overlayVideoEls[trackIdx]!.preload = 'auto';
-      }
-      if (overlayVideoCurrentPaths[trackIdx] !== mediaPath && activeProjectPath) {
-        // Absolute paths (window captures) should not be prefixed with project path
-        const isAbsolute = mediaPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(mediaPath);
-        const fullPath = isAbsolute ? mediaPath : `${activeProjectPath}/${mediaPath}`;
-        overlayVideoEls[trackIdx]!.src = pathToFileUrl(fullPath);
-        overlayVideoCurrentPaths[trackIdx] = mediaPath;
-      }
-      return overlayVideoEls[trackIdx];
-    }
-
-    function formatProjectDate(value: unknown): string {
-      if (!value) return '';
-      const dt = new Date(value as string | number);
-      if (Number.isNaN(dt.getTime())) return '';
-      return dt.toLocaleString();
-    }
-
-    function setToggleButtonState(button: HTMLButtonElement, active: boolean, disabled: boolean): void {
-      button.disabled = !!disabled;
-      button.className = `px-3 py-1.5 rounded-md text-sm transition-colors ${active ? 'bg-white text-neutral-950 font-medium' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800'} disabled:opacity-40 disabled:cursor-not-allowed`;
-    }
-
-    function updateWorkspaceHeader(): void {
-      const hasProject = !!activeProjectPath;
-      const showTimelineTools = hasProject && activeWorkspaceView === 'timeline';
-      activeProjectNameEl.textContent = activeProject?.name || 'Project';
-      activeProjectPathEl.textContent = activeProjectPath || '';
-      workspaceHeader.classList.toggle('hidden', !hasProject || activeWorkspaceView === 'home');
-      setToggleButtonState(goRecordingBtn, activeWorkspaceView === 'recording', !hasProject || activeWorkspaceView === 'processing');
-      setToggleButtonState(goTimelineBtn, activeWorkspaceView === 'timeline', !hasProject || !editorState || activeWorkspaceView === 'processing' || recording);
-      recordBtn.classList.toggle('hidden', activeWorkspaceView !== 'recording');
-      timerEl.classList.toggle('hidden', activeWorkspaceView !== 'recording');
-      cameraSyncOffsetControl.classList.toggle('hidden', !showTimelineTools);
-      cameraSyncOffsetControl.classList.toggle('flex', showTimelineTools);
-      exportAudioPresetControl.classList.toggle('hidden', !showTimelineTools);
-      exportAudioPresetControl.classList.toggle('flex', showTimelineTools);
-      editorRenderBtn.classList.toggle('hidden', !showTimelineTools);
-    }
-
-    function hasPendingEditorDraw(): boolean {
-      return !!editorDrawRAF || !!editorPausedDrawTimer || editorVideoFrameCallbackId !== null;
-    }
-
-    function cancelEditorDrawLoop(): void {
-      if (editorDrawRAF) {
-        cancelAnimationFrame(editorDrawRAF);
-        editorDrawRAF = null;
-      }
-      if (editorPausedDrawTimer) {
-        clearTimeout(editorPausedDrawTimer);
-        editorPausedDrawTimer = null;
-      }
-      if (editorVideoFrameHost && editorVideoFrameCallbackId !== null
-          && typeof editorVideoFrameHost.cancelVideoFrameCallback === 'function') {
-        try {
-          editorVideoFrameHost.cancelVideoFrameCallback(editorVideoFrameCallbackId);
-        } catch (_error) {
-          // Ignore cancellation races while switching active takes.
-        }
-      }
-      editorVideoFrameCallbackId = null;
-      editorVideoFrameHost = null;
-      if (editorVideoFrameSafetyTimer) {
-        clearTimeout(editorVideoFrameSafetyTimer);
-        editorVideoFrameSafetyTimer = null;
-      }
-    }
-
-    function scheduleEditorDrawLoop(): void {
-      if (!editorState || activeWorkspaceView !== 'timeline') return;
-
-      if (editorState.playing && activeTakeId) {
-        const videos = getOrCreateTakeVideos(activeTakeId);
-        const screen = videos?.screen;
-        if (screen && typeof screen.requestVideoFrameCallback === 'function') {
-          editorVideoFrameHost = screen;
-          editorVideoFrameCallbackId = screen.requestVideoFrameCallback(() => {
-            if (editorVideoFrameSafetyTimer) { clearTimeout(editorVideoFrameSafetyTimer); editorVideoFrameSafetyTimer = null; }
-            editorVideoFrameCallbackId = null;
-            editorVideoFrameHost = null;
-            editorDrawLoop();
-          });
-          editorVideoFrameSafetyTimer = setTimeout(() => {
-            editorVideoFrameSafetyTimer = null;
-            if (editorVideoFrameCallbackId !== null && editorState?.playing) {
-              cancelEditorDrawLoop();
-              editorDrawRAF = requestAnimationFrame(() => {
-                editorDrawRAF = null;
-                editorDrawLoop();
-              });
-            }
-          }, 200);
-          return;
-        }
-      }
-
-      if (editorState.playing) {
-        editorDrawRAF = requestAnimationFrame(() => {
-          editorDrawRAF = null;
-          editorDrawLoop();
-        });
-        return;
-      }
-
-      editorPausedDrawTimer = setTimeout(() => {
-        editorPausedDrawTimer = null;
-        editorDrawRAF = requestAnimationFrame(() => {
-          editorDrawRAF = null;
-          editorDrawLoop();
-        });
-      }, Math.round(1000 / 24));
-    }
-
-    function setWorkspaceView(nextView: string): void {
-      activeWorkspaceView = nextView;
-      const showHome = nextView === 'home';
-      const showRecording = nextView === 'recording';
-      const showTimeline = nextView === 'timeline' && !!editorState;
-      const showProcessing = nextView === 'processing';
-
-      projectHomeView.classList.toggle('hidden', !showHome);
-      recordingView.classList.toggle('hidden', !showRecording);
-      editorView.classList.toggle('hidden', !showTimeline);
-      processingView.classList.toggle('hidden', !showProcessing);
-
-      if (showRecording) {
-        if (mediaIdleTimer) {
-          clearTimeout(mediaIdleTimer);
-          mediaIdleTimer = null;
-        }
-        if (!mediaInitialized) {
-          ensureMediaInitialized();
-        }
-        updatePreview();
-      } else if (drawRAF) {
-        cancelAnimationFrame(drawRAF);
-        drawRAF = null;
-      }
-
-      // Start idle timer when leaving recording view (and streams are active)
-      if (!showRecording && mediaInitialized && !recording && !mediaIdleTimer) {
-        mediaIdleTimer = setTimeout(() => {
-          mediaIdleTimer = null;
-          cleanupAllMedia({
-            recording, screenStream, cameraStream, audioStream,
-            recorders, screenRecInterval, audioSendInterval, timerInterval,
-            audioContext, scribeWorkletNode, scribeWs,
-            drawRAF, meterRAF, cancelEditorDrawLoop, stopAudioMeter,
-            windowStreams, windowRecIntervals
-          });
-          screenStream = null;
-          cameraStream = null;
-          audioStream = null;
-          recorders = [];
-          screenRecInterval = null;
-          audioSendInterval = null;
-          audioContext = null;
-          scribeWorkletNode = null;
-          scribeWs = null;
-          drawRAF = null;
-          meterRAF = null;
-          windowStreams = [];
-          windowVideos = [];
-          windowRecIntervals = [];
-          windowSourceNames = [];
-          mediaInitialized = false;
-        }, MEDIA_IDLE_TIMEOUT_MS);
-      }
-
-      if (showTimeline && editorState && !hasPendingEditorDraw()) {
-        editorDrawLoop();
-      } else if (!showTimeline && hasPendingEditorDraw()) {
-        cancelEditorDrawLoop();
-        if (editorState?.playing) editorPause();
-      }
-
-      updateWorkspaceHeader();
-    }
-
-    function getProjectTimelineSnapshot(): ProjectTimeline {
-      if (!editorState) {
-        return activeProject?.timeline || {
-          duration: 0,
-          sections: [],
-          savedSections: [],
-          keyframes: [],
-          selectedSectionId: null,
-          hasCamera: false,
-          sourceWidth: null,
-          sourceHeight: null,
-          overlays: [],
-          savedOverlays: [],
-          audioOverlays: [],
-          savedAudioOverlays: [],
-          backgroundImagePath: null
-        };
-      }
-
-      return {
-        duration: Number(editorState.duration) || 0,
-        sections: Array.isArray(editorState.sections) ? editorState.sections.map(section => ({ ...section })) : [],
-        savedSections: Array.isArray(editorState.savedSections) ? editorState.savedSections.map(section => ({ ...section })) : [],
-        keyframes: Array.isArray(editorState.keyframes)
-          ? editorState.keyframes.map(kf => ({
-            ...kf,
-            backgroundZoom: clampSectionZoom(kf.backgroundZoom),
-            backgroundPanX: clampSectionPan(kf.backgroundPanX),
-            backgroundPanY: clampSectionPan(kf.backgroundPanY),
-            reelCropX: clampReelCropX(kf.reelCropX),
-            pipScale: normalizePipScale(kf.pipScale)
-          }))
-          : [],
-        selectedSectionId: editorState.selectedSectionId || null,
-        hasCamera: !!editorState.hasCamera,
-        sourceWidth: editorState.sourceWidth || null,
-        sourceHeight: editorState.sourceHeight || null,
-        overlays: Array.isArray(editorState.overlays) ? editorState.overlays.map(o => ({ ...o, landscape: { ...o.landscape }, reel: { ...o.reel } })) : [],
-        savedOverlays: Array.isArray(editorState.savedOverlays) ? editorState.savedOverlays.map(o => ({ ...o, landscape: { ...o.landscape }, reel: { ...o.reel } })) : [],
-        audioOverlays: Array.isArray(editorState.audioOverlays) ? editorState.audioOverlays.map(ao => ({ ...ao })) : [],
-        savedAudioOverlays: Array.isArray(editorState.savedAudioOverlays) ? editorState.savedAudioOverlays.map(ao => ({ ...ao })) : [],
-        backgroundImagePath: backgroundImagePath
-      };
-    }
-
-    function buildProjectSavePayload(): unknown {
-      if (!activeProject) return null;
-      return {
-        ...activeProject,
-        settings: {
-          screenFitMode: screenFitSelect.value || 'fill',
-          hideFromRecording: hideFromRecording === 'true',
-          exportAudioPreset: normalizeExportAudioPreset(exportAudioPresetSelect.value),
-          cameraSyncOffsetMs: normalizeCameraSyncOffsetMs(cameraSyncOffsetInput.value),
-          outputMode: editorState?.outputMode || 'landscape',
-          pipScale: editorState?.pipScale || DEFAULT_PIP_SCALE
-        },
-        timeline: getProjectTimelineSnapshot()
-      };
-    }
-
-    async function persistProjectNow(): Promise<void> {
-      if (!activeProjectPath || !activeProject) return;
-      const expectedProjectPath = activeProjectPath;
-      const payload = buildProjectSavePayload();
-      if (!payload) return;
-
-      persistQueue = persistQueue.then(async () => {
-        const result = await window.electronAPI.projectSave({
-          projectPath: expectedProjectPath,
-          project: payload
-        });
-        if (result?.projectPath && result?.project && activeProjectPath === expectedProjectPath) {
-          activeProjectPath = result.projectPath;
-          activeProject = result.project;
-          saveFolder = activeProjectPath;
-          folderPathEl.textContent = activeProjectPath;
-          openFolderBtn.classList.toggle('hidden', !activeProjectPath);
-          updateWorkspaceHeader();
-          await window.electronAPI.projectSetLast(expectedProjectPath);
-        }
-      }).catch((error: unknown) => {
-        console.error('Failed to persist project:', error);
-      });
-
-      await persistQueue;
-    }
-
-    async function saveRecoveryTake(take: unknown): Promise<void> {
-      if (!activeProjectPath || !(take as RecoveryTake)?.screenPath) return;
-      try {
-        await window.electronAPI.projectSetRecoveryTake({
-          projectPath: activeProjectPath,
-          take
-        });
-      } catch (error) {
-        console.error('Failed to save recovery take:', error);
-      }
-    }
-
-    async function _clearRecoveryTake(projectPath = activeProjectPath): Promise<void> {
-      if (!projectPath) return;
-      try {
-        await window.electronAPI.projectClearRecoveryTake(projectPath);
-      } catch (error) {
-        console.error('Failed to clear recovery take:', error);
-      }
-    }
-
-    async function completeRecoveryTake(projectPath = activeProjectPath): Promise<void> {
-      if (!projectPath) return;
-      try {
-        await window.electronAPI.projectCompleteRecoveryTake(projectPath);
-      } catch (error) {
-        console.error('Failed to finalize recovery take:', error);
-      }
-    }
-
-    function scheduleProjectSave(): void {
-      if (!activeProjectPath || !activeProject) return;
-      if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
-      saveDebounceTimer = setTimeout(() => {
-        persistProjectNow().catch((error: unknown) => {
-          console.error('Failed to save project:', error);
-        });
-      }, 250);
-    }
-
-    async function flushScheduledProjectSave(): Promise<void> {
-      if (saveDebounceTimer) {
-        clearTimeout(saveDebounceTimer);
-        saveDebounceTimer = null;
-      }
-      await persistProjectNow();
-    }
-
-    function clearEditorState(): void {
-      editorPause();
-      cancelEditorDrawLoop();
-
-      cleanupVideoPool();
-      // Clean up overlay media state
-      overlayImageCache.clear();
-      mouseTrailCache.clear();
-      for (let t = 0; t < overlayVideoEls.length; t++) {
-        if (overlayVideoEls[t]) {
-          overlayVideoEls[t]!.pause();
-          overlayVideoEls[t]!.removeAttribute('src');
-          overlayVideoEls[t]!.load();
-          overlayVideoEls[t] = null;
-        }
-        overlayVideoCurrentPaths[t] = null;
-      }
-      editorState = null;
-      proxyStatus.clear();
-      undoStack.length = 0;
-      redoStack.length = 0;
-      waveformPeaks = null;
-      clearAudioBufferCache();
-      renderWaveform();
-      renderSectionMarkers();
-      updateSectionZoomControls();
-      updateWorkspaceHeader();
-      updateUndoRedoButtons();
-    }
-
-    function isTakeReferenced(takeId: string): boolean {
-      if (!editorState || !takeId) return false;
-      return editorState.sections.some(s => s.takeId === takeId) ||
-        editorState.savedSections.some(s => s.takeId === takeId);
-    }
-
-    async function stageTakeIfUnreferenced(takeId: string): Promise<void> {
-      if (!takeId || !activeProjectPath || !activeProject) return;
-      if (isTakeReferenced(takeId)) return;
-      const take = activeProject.takes?.find((t: Take) => t.id === takeId);
-      if (!take) return;
-      const filePaths = [take.screenPath, take.cameraPath, take.mousePath, take.proxyPath].filter(Boolean) as string[];
-      if (Array.isArray(take.windowPaths)) {
-        for (const wp of take.windowPaths) {
-          if (wp.path) filePaths.push(wp.path);
-          if (wp.proxyPath) filePaths.push(wp.proxyPath);
-        }
-      }
-      if (filePaths.length > 0) {
-        await window.electronAPI.stageTakeFiles(activeProjectPath, filePaths);
-      }
-    }
-
-    async function unstageTakeById(takeId: string): Promise<void> {
-      if (!takeId || !activeProjectPath || !activeProject) return;
-      const take = activeProject.takes?.find((t: Take) => t.id === takeId);
-      if (!take) return;
-      const allPaths = [take.screenPath, take.cameraPath, take.mousePath, take.proxyPath] as (string | null)[];
-      if (Array.isArray(take.windowPaths)) {
-        for (const wp of take.windowPaths) {
-          if (wp.path) allPaths.push(wp.path);
-          if (wp.proxyPath) allPaths.push(wp.proxyPath);
-        }
-      }
-      const fileNames = allPaths
-        .filter(Boolean)
-        .map((p) => {
-          const parts = (p as string).split(/[/\\]/);
-          return parts[parts.length - 1]!;
-        });
-      if (fileNames.length > 0) {
-        await window.electronAPI.unstageTakeFiles(activeProjectPath, fileNames);
-      }
-    }
-
-    async function toggleSectionSaved(sectionId: string): Promise<void> {
-      if (!editorState) return;
-
-      // Check if it's an active section
-      const activeSection = editorState.sections.find(s => s.id === sectionId);
-      if (activeSection) {
-        pushUndo();
-        activeSection.saved = !activeSection.saved;
-        renderSectionTranscriptList();
-        scheduleProjectSave();
-        return;
-      }
-
-      // Check if it's a saved+removed section — unsaving removes it entirely
-      const savedIndex = editorState.savedSections.findIndex(s => s.id === sectionId);
-      if (savedIndex >= 0) {
-        pushUndo();
-        const removed = editorState.savedSections.splice(savedIndex, 1)[0]!;
-        await stageTakeIfUnreferenced(removed.takeId!);
-        renderSectionTranscriptList();
-        scheduleProjectSave();
-      }
-    }
-
-    async function readdSavedSection(sectionId: string): Promise<void> {
-      if (!editorState) return;
-      const savedIndex = editorState.savedSections.findIndex(s => s.id === sectionId);
-      if (savedIndex < 0) return;
-
-      pushUndo();
-
-      const section = editorState.savedSections.splice(savedIndex, 1)[0]!;
-
-      let insertIndex = editorState.sections.length;
-      for (let i = 0; i < editorState.sections.length; i++) {
-        if (editorState.sections[i]!.start >= section.start) {
-          insertIndex = i;
-          break;
-        }
-      }
-      editorState.sections.splice(insertIndex, 0, section);
-
-      reindexSections(editorState.sections);
-      recalculateTimelinePositions();
-      syncSectionAnchorKeyframes();
-
-      const readdedSection = editorState.sections.find(s => s.id === sectionId);
-      renderSectionTranscriptList();
-      renderSectionMarkers();
-      refreshWaveform();
-      editorSeek(readdedSection?.start ?? 0);
-      scheduleProjectSave();
-    }
-
-    function snapshotTimeline(): TimelineSnapshot {
-      return {
-        sections: editorState!.sections.map(s => ({ ...s })),
-        savedSections: editorState!.savedSections.map(s => ({ ...s })),
-        keyframes: editorState!.keyframes.map(kf => ({ ...kf })),
-        overlays: editorState!.overlays.map(o => ({ ...o, landscape: { ...o.landscape }, reel: { ...o.reel } })),
-        savedOverlays: editorState!.savedOverlays.map(o => ({ ...o, landscape: { ...o.landscape }, reel: { ...o.reel } })),
-        selectedOverlayId: editorState!.selectedOverlayId,
-        audioOverlays: editorState!.audioOverlays.map(ao => ({ ...ao })),
-        savedAudioOverlays: editorState!.savedAudioOverlays.map(ao => ({ ...ao })),
-        selectedAudioOverlayId: editorState!.selectedAudioOverlayId,
-        selectedSectionId: editorState!.selectedSectionId,
-        duration: editorState!.duration,
-        outputMode: editorState!.outputMode
-      };
-    }
-
-    async function restoreSnapshot(snapshot: TimelineSnapshot): Promise<void> {
-      // Capture current take references before restore
-      const beforeTakeIds = new Set<string>();
-      for (const s of editorState!.sections) if (s.takeId) beforeTakeIds.add(s.takeId);
-      for (const s of editorState!.savedSections) if (s.takeId) beforeTakeIds.add(s.takeId);
-      // Capture current overlay media references before restore
-      const beforeOverlayPaths = new Set<string>();
-      for (const o of editorState!.overlays) if (o.mediaPath) beforeOverlayPaths.add(o.mediaPath);
-      const beforeAudioOverlayPaths = new Set<string>();
-      for (const ao of editorState!.audioOverlays) if (ao.mediaPath) beforeAudioOverlayPaths.add(ao.mediaPath);
-
-      editorState!.sections = snapshot.sections;
-      editorState!.savedSections = snapshot.savedSections || [];
-      editorState!.keyframes = snapshot.keyframes;
-      editorState!.overlays = snapshot.overlays || [];
-      editorState!.savedOverlays = snapshot.savedOverlays || [];
-      editorState!.selectedOverlayId = snapshot.selectedOverlayId || null;
-      editorState!.audioOverlays = snapshot.audioOverlays || [];
-      editorState!.savedAudioOverlays = snapshot.savedAudioOverlays || [];
-      editorState!.selectedAudioOverlayId = snapshot.selectedAudioOverlayId || null;
-      editorState!.selectedSectionId = snapshot.selectedSectionId;
-      editorState!.duration = snapshot.duration;
-      if (snapshot.outputMode) {
-        editorState!.outputMode = snapshot.outputMode;
-        const { w, h } = getEffectiveCanvasDimensions();
-        const defaultPs = editorState!.pipScale || DEFAULT_PIP_SCALE;
-        editorState!.pipSize = computePipSize(defaultPs, w);
-        editorState!.defaultPipX = w - editorState!.pipSize - PIP_MARGIN;
-        editorState!.defaultPipY = h - editorState!.pipSize - PIP_MARGIN;
-        updateOutputModeUI();
-      }
-
-      // Compute take references after restore
-      const afterTakeIds = new Set<string>();
-      for (const s of editorState!.sections) if (s.takeId) afterTakeIds.add(s.takeId);
-      for (const s of editorState!.savedSections) if (s.takeId) afterTakeIds.add(s.takeId);
-
-      for (const takeId of beforeTakeIds) {
-        if (!afterTakeIds.has(takeId)) {
-          await stageTakeIfUnreferenced(takeId);
-        }
-      }
-      for (const takeId of afterTakeIds) {
-        if (!beforeTakeIds.has(takeId)) {
-          await unstageTakeById(takeId);
-        }
-      }
-
-      const afterOverlayPaths = new Set<string>();
-      for (const o of editorState!.overlays) if (o.mediaPath) afterOverlayPaths.add(o.mediaPath);
-      if (activeProjectPath) {
-        for (const mediaPath of beforeOverlayPaths) {
-          if (!afterOverlayPaths.has(mediaPath)) {
-            await window.electronAPI.stageOverlayFile(activeProjectPath, mediaPath).catch(() => {});
-          }
-        }
-        for (const mediaPath of afterOverlayPaths) {
-          if (!beforeOverlayPaths.has(mediaPath)) {
-            await window.electronAPI.unstageOverlayFile(activeProjectPath, mediaPath).catch(() => {});
-          }
-        }
-      }
-
-      // Audio overlay file staging on undo/redo
-      const afterAudioOverlayPaths = new Set<string>();
-      for (const ao of editorState!.audioOverlays) if (ao.mediaPath) afterAudioOverlayPaths.add(ao.mediaPath);
-      if (activeProjectPath) {
-        for (const mediaPath of beforeAudioOverlayPaths) {
-          if (!afterAudioOverlayPaths.has(mediaPath)) {
-            await window.electronAPI.stageAudioOverlayFile(activeProjectPath, mediaPath).catch(() => {});
-          }
-        }
-        for (const mediaPath of afterAudioOverlayPaths) {
-          if (!beforeAudioOverlayPaths.has(mediaPath)) {
-            await window.electronAPI.unstageAudioOverlayFile(activeProjectPath, mediaPath).catch(() => {});
-          }
-        }
-      }
-
-      recalculateTimelinePositions();
-      syncSectionAnchorKeyframes();
-      renderSectionMarkers();
-      renderSectionTranscriptList();
-      updateSectionZoomControls();
-      refreshWaveform();
-      editorSeek(Math.min(editorState!.currentTime, editorState!.duration));
-      updateUndoRedoButtons();
-      scheduleProjectSave();
-    }
-
-    function pushUndo(): void {
-      if (!editorState) return;
-      undoStack.push(snapshotTimeline());
-      if (undoStack.length > MAX_UNDO) undoStack.shift();
-      redoStack.length = 0;
-      updateUndoRedoButtons();
-    }
-
-    async function editorUndo(): Promise<void> {
-      if (!editorState || editorState.rendering || undoStack.length === 0) return;
-      redoStack.push(snapshotTimeline());
-      await restoreSnapshot(undoStack.pop()!);
-    }
-
-    async function editorRedo(): Promise<void> {
-      if (!editorState || editorState.rendering || redoStack.length === 0) return;
-      undoStack.push(snapshotTimeline());
-      await restoreSnapshot(redoStack.pop()!);
-    }
-
-    function updateUndoRedoButtons(): void {
-      editorUndoBtn.disabled = undoStack.length === 0;
-      editorRedoBtn.disabled = redoStack.length === 0;
-    }
-
-    function renderRecentProjects(meta: RecentProjectsResult): void {
-      const projects = Array.isArray(meta?.projects) ? meta.projects : [];
-      const lastPath = meta?.lastProjectPath || '';
-
-      recentProjectsList.innerHTML = '';
-      if (projects.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'text-sm text-neutral-600 py-2';
-        empty.textContent = 'No recent projects yet.';
-        recentProjectsList.appendChild(empty);
-      } else {
-        for (const project of projects) {
-          const btn = document.createElement('button');
-          btn.className = 'w-full text-left bg-neutral-900 border border-neutral-800 rounded-lg px-4 py-3 hover:bg-neutral-800 hover:border-neutral-700 transition-all';
-          btn.type = 'button';
-          btn.dataset.projectPath = project.projectPath;
-
-          const title = document.createElement('div');
-          title.className = 'text-sm text-neutral-100 truncate font-medium';
-          title.textContent = project.name || 'Untitled Project';
-          const subtitle = document.createElement('div');
-          subtitle.className = 'text-xs text-neutral-500 truncate mt-0.5';
-          subtitle.textContent = `${project.projectPath} • ${formatProjectDate(project.updatedAt)}`;
-          btn.appendChild(title);
-          btn.appendChild(subtitle);
-          recentProjectsList.appendChild(btn);
-        }
-      }
-
-      const last = projects.find((project: { projectPath: string }) => project.projectPath === lastPath) || projects[0];
-      if (last) {
-        lastProjectName.textContent = last.name || 'Untitled Project';
-        lastProjectPath.textContent = last.projectPath;
-        resumeLastBtn.dataset.projectPath = last.projectPath;
-        lastProjectRow.classList.remove('hidden');
-      } else {
-        lastProjectRow.classList.add('hidden');
-        resumeLastBtn.dataset.projectPath = '';
-      }
-    }
-
-    function clearProjectHomeMessage(): void {
-      projectHomeMessage.textContent = '';
-      projectHomeMessage.className = 'hidden rounded border px-3 py-2 text-sm';
-    }
-
-    function showProjectHomeMessage(message: string, tone = 'error'): void {
-      if (!message) {
-        clearProjectHomeMessage();
-        return;
-      }
-
-      const toneClass = tone === 'info'
-        ? 'border-blue-500/40 bg-blue-500/10 text-blue-200'
-        : 'border-red-500/40 bg-red-500/10 text-red-200';
-
-      projectHomeMessage.textContent = message;
-      projectHomeMessage.className = `rounded border px-3 py-2 text-sm ${toneClass}`;
-    }
-
-    async function refreshRecentProjects(): Promise<void> {
-      try {
-        const recent = await window.electronAPI.projectListRecent(8);
-        renderRecentProjects(recent || { projects: [], lastProjectPath: null });
-      } catch (error) {
-        console.error('Failed to list recent projects:', error);
-        renderRecentProjects({ projects: [], lastProjectPath: null });
-      }
-    }
-
-    async function activateProject(projectPath: string, project: Project, preferredView = 'recording'): Promise<void> {
-      if (!projectPath || !project) return;
-
-      await flushScheduledProjectSave();
-      try { await window.electronAPI.cleanupDeleted(projectPath); } catch (_e) { /* best effort */ }
-      clearEditorState();
-      activeProjectSession += 1;
-
-      activeProjectPath = projectPath;
-      activeProject = project;
-      saveFolder = projectPath;
-      folderPathEl.textContent = projectPath;
-      openFolderBtn.classList.remove('hidden');
-      screenFitSelect.value = project.settings?.screenFitMode === 'fit' ? 'fit' : 'fill';
-      hideFromRecording = project.settings?.hideFromRecording === false ? 'false' : 'true';
-      exportAudioPresetSelect.value = normalizeExportAudioPreset(project.settings?.exportAudioPreset);
-      cameraSyncOffsetInput.value = String(normalizeCameraSyncOffsetMs(project.settings?.cameraSyncOffsetMs));
-      await syncContentProtection();
-
-      if (project.timeline && Array.isArray(project.timeline.sections) && project.timeline.sections.length > 0) {
-        enterEditor(
-          project.timeline.sections,
-          {
-            duration: project.timeline.duration || 0,
-            keyframes: project.timeline.keyframes || [],
-            savedSections: project.timeline.savedSections || [],
-            selectedSectionId: project.timeline.selectedSectionId || null,
-            hasCamera: !!project.timeline.hasCamera,
-            sourceWidth: project.timeline.sourceWidth || null,
-            sourceHeight: project.timeline.sourceHeight || null,
-            cameraSyncOffsetMs: project.settings?.cameraSyncOffsetMs,
-            outputMode: project.settings?.outputMode,
-            pipScale: project.settings?.pipScale,
-            overlays: project.timeline.overlays || [],
-            savedOverlays: project.timeline.savedOverlays || [],
-            audioOverlays: project.timeline.audioOverlays || [],
-            savedAudioOverlays: project.timeline.savedAudioOverlays || [],
-            initialView: preferredView === 'recording' ? 'recording' : 'timeline'
-          }
-        );
-      } else {
-        setWorkspaceView('recording');
-      }
-
-      // Load background image if set in project
-      if (project.timeline?.backgroundImagePath) {
-        loadBackgroundFromPath(project.timeline.backgroundImagePath).catch(() => {});
-      }
-
-      await window.electronAPI.projectSetLast(projectPath);
-      updateWorkspaceHeader();
-
-      // Queue background proxy generation for any takes missing a proxy
-      if (Array.isArray(project.takes)) {
-        let needsMarkerUpdate = false;
-        for (const take of project.takes) {
-          if (!take.proxyPath && take.screenPath) {
-            // Standard screen proxy
-            proxyStatus.set(take.id, { status: 'pending', percent: 0 });
-            needsMarkerUpdate = true;
-            window.electronAPI.generateProxy({
-              takeId: take.id,
-              screenPath: take.screenPath,
-              projectFolder: projectPath,
-              durationSec: take.duration || 0
-            }).catch((err: unknown) => console.warn('[Proxy] Failed to start proxy generation:', err));
-          }
-          // Window file proxies
-          if (Array.isArray(take.windowPaths)) {
-            for (let wi = 0; wi < take.windowPaths.length; wi++) {
-              const wp = take.windowPaths[wi]!;
-              if (wp.path && !wp.proxyPath) {
-                const proxyKey = `${take.id}-win${wi}`;
-                proxyStatus.set(proxyKey, { status: 'pending', percent: 0 });
-                needsMarkerUpdate = true;
-                window.electronAPI.generateProxy({
-                  takeId: proxyKey,
-                  screenPath: wp.path,
-                  projectFolder: projectPath,
-                  durationSec: take.duration || 0
-                }).catch((err: unknown) => console.warn(`[Proxy] Failed for window ${wi}:`, err));
+        // Hot-swap the cached video element to use the proxy
+        const cached = takeVideoPool.get(payload.takeId);
+        if (cached) {
+          const wasPlaying = !cached.screen.paused;
+          const currentTime = cached.screen.currentTime;
+          const rate = cached.screen.playbackRate;
+          cached.screen.src = pathToFileUrl(payload.proxyPath!);
+          cached.screen.addEventListener(
+            'loadedmetadata',
+            () => {
+              cached.screen.currentTime = currentTime;
+              if (wasPlaying) {
+                cached.screen.playbackRate = rate;
+                cached.screen.play().catch(() => {});
+                if (!hasPendingEditorDraw()) scheduleEditorDrawLoop();
               }
-            }
-          }
-        }
-        if (needsMarkerUpdate) renderSectionMarkers();
-      }
-    }
-
-    async function ensureMediaInitialized(): Promise<void> {
-      if (mediaInitialized) return;
-      mediaInitialized = true;
-      await enumerateDevices();
-      // Acquire streams based on picker state
-      if (pickerMode === 'windows' && pickerCheckedWindows.length > 0) {
-        try { await updateWindowStreams(pickerCheckedWindows); } catch (error) { console.warn('Window stream init failed:', error); }
-      } else {
-        try { await updateScreenStream(); } catch (error) { console.warn('Screen source init failed:', error); }
-      }
-      try { await updateCameraStream(); } catch (error) { console.warn('Camera source init failed:', error); }
-      try { await updateAudioStream(); } catch (error) { console.warn('Audio source init failed:', error); }
-      if (activeWorkspaceView === 'recording') updatePreview();
-    }
-
-    async function syncContentProtection(): Promise<void> {
-      const enabled = hideFromRecording === 'true';
-      contentProtectionToggle.checked = enabled;
-
-      try {
-        await window.electronAPI.setContentProtection(enabled);
-      } catch (error) {
-        console.error('Failed to update content protection:', error);
-      }
-    }
-
-    function findSectionForTime(time: number): Section | null {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return null;
-      const sections = editorState.sections;
-      for (let i = 0; i < sections.length; i++) {
-        const section = sections[i]!;
-        const isLast = i === sections.length - 1;
-        if (time >= section.start && (time < section.end || (isLast && time <= section.end + 0.001))) {
-          return section;
+            },
+            { once: true }
+          );
         }
       }
-      if (time < sections[0]!.start) return sections[0]!;
-      return sections[sections.length - 1]!;
-    }
-
-    function getSelectedSection(): Section | null {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return null;
-      return editorState.sections.find(section => section.id === editorState!.selectedSectionId) || editorState.sections[0]!;
-    }
-
-    function getSectionBackgroundZoom(sectionId: string): number {
-      if (!editorState || !sectionId) return DEFAULT_SECTION_ZOOM;
-      const anchor = editorState.keyframes.find(kf => kf.sectionId === sectionId);
-      return clampSectionZoom(anchor?.backgroundZoom);
-    }
-
-    function getSectionBackgroundPan(sectionId: string): { x: number; y: number } {
-      if (!editorState || !sectionId) return { x: 0, y: 0 };
-      const anchor = editorState.keyframes.find(kf => kf.sectionId === sectionId);
-      return {
-        x: clampSectionPan(anchor?.backgroundPanX),
-        y: clampSectionPan(anchor?.backgroundPanY)
-      };
-    }
-
-    function updateSectionZoomControls(): void {
-      if (!editorBgZoomInput || !editorBgZoomValue) return;
-      const selectedSection = getSelectedSection();
-      const disabled = !editorState || editorState.rendering || !selectedSection;
-      const zoom = selectedSection ? getSectionBackgroundZoom(selectedSection.id) : DEFAULT_SECTION_ZOOM;
-      editorBgZoomInput.disabled = disabled;
-      editorBgZoomInput.value = String(zoom);
-      editorBgZoomValue.textContent = formatSectionZoom(zoom);
-
-      // Update PIP size slider to reflect current section's pipScale
-      if (editorPipSizeInput && editorState) {
-        const sectionAnchor = selectedSection ? getSectionAnchorKeyframe(selectedSection.id, false) : null;
-        const sectionPipScale = sectionAnchor ? normalizePipScale(sectionAnchor.pipScale) : (editorState.pipScale || DEFAULT_PIP_SCALE);
-        editorPipSizeInput.value = String(sectionPipScale);
-        if (editorPipSizeValue) editorPipSizeValue.textContent = sectionPipScale.toFixed(2);
-      }
-
-      // Update auto-track controls
-      if (editorAutoTrackControl && editorState) {
-        const sectionAnchor = selectedSection ? getSectionAnchorKeyframe(selectedSection.id, false) : null;
-        const hasMouseData = selectedSection && getMouseTrailForTake(selectedSection.takeId!);
-        const showAutoTrack = hasMouseData && zoom > 1.0001;
-        editorAutoTrackControl.classList.toggle('hidden', !showAutoTrack);
-        editorAutoTrackControl.classList.toggle('flex', !!showAutoTrack);
-        if (showAutoTrack && sectionAnchor) {
-          const isOn = !!sectionAnchor.autoTrack;
-          if (editorAutoTrackToggle) {
-            editorAutoTrackToggle.textContent = isOn ? 'Track \u2713' : 'Track';
-            editorAutoTrackToggle.style.color = isOn ? '' : '';
-            editorAutoTrackToggle.className = `text-xs transition-colors ${isOn ? 'text-emerald-300 font-bold' : 'text-emerald-400 hover:text-emerald-300'}`;
-          }
-          const sm = sectionAnchor.autoTrackSmoothing || 0.15;
-          if (editorAutoTrackSmoothInput) editorAutoTrackSmoothInput.value = String(sm);
-          if (editorAutoTrackSmoothValue) editorAutoTrackSmoothValue.textContent = sm.toFixed(2);
-        }
-      }
-    }
-
-    function getSectionAnchorKeyframe(sectionId: string, createIfMissing: boolean): Keyframe | null {
-      if (!editorState || !sectionId) return null;
-
-      let anchor = editorState.keyframes.find(kf => kf.sectionId === sectionId);
-      if (anchor || !createIfMissing) return anchor || null;
-
-      const section = editorState.sections.find(s => s.id === sectionId);
-      if (!section) return null;
-
-      const fallback = getStateAtTime(section.start);
-      anchor = {
-        time: section.start,
-        pipX: fallback.pipX,
-        pipY: fallback.pipY,
-        pipVisible: fallback.pipVisible,
-        cameraFullscreen: fallback.cameraFullscreen || false,
-        backgroundZoom: clampSectionZoom(fallback.backgroundZoom),
-        backgroundPanX: clampSectionPan(fallback.backgroundPanX),
-        backgroundPanY: clampSectionPan(fallback.backgroundPanY),
-        reelCropX: clampReelCropX(fallback.reelCropX),
-        pipScale: normalizePipScale(fallback.pipScale),
-        pipSnapPoint: (fallback.pipSnapPoint || 'br') as PipSnapPoint,
-        autoTrack: !!fallback.autoTrack,
-        autoTrackSmoothing: fallback.autoTrackSmoothing || 0.15,
-        sectionId: section.id,
-        autoSection: true,
-        savedLandscape: null,
-        savedReel: null
-      };
-      editorState.keyframes.push(anchor);
-      editorState.keyframes.sort((a, b) => a.time - b.time);
-      return anchor;
-    }
-
-    function syncSectionAnchorKeyframes(): void {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return;
-
-      const manual = editorState.keyframes
-        .filter(kf => !kf.sectionId)
-        .map(kf => ({
-          ...kf,
-          backgroundZoom: clampSectionZoom(kf.backgroundZoom),
-          backgroundPanX: clampSectionPan(kf.backgroundPanX),
-          backgroundPanY: clampSectionPan(kf.backgroundPanY)
-        }));
-      const sectionAnchors: Keyframe[] = editorState.sections.map((section) => {
-        const existing = editorState!.keyframes.find(kf => kf.sectionId === section.id);
-        return {
-          time: section.start,
-          pipX: existing ? existing.pipX : editorState!.defaultPipX,
-          pipY: existing ? existing.pipY : editorState!.defaultPipY,
-          pipVisible: existing ? existing.pipVisible : true,
-          cameraFullscreen: existing ? !!existing.cameraFullscreen : false,
-          backgroundZoom: existing ? clampSectionZoom(existing.backgroundZoom) : DEFAULT_SECTION_ZOOM,
-          backgroundPanX: existing ? clampSectionPan(existing.backgroundPanX) : 0,
-          backgroundPanY: existing ? clampSectionPan(existing.backgroundPanY) : 0,
-          reelCropX: existing ? clampReelCropX(existing.reelCropX) : 0,
-          pipScale: existing ? normalizePipScale(existing.pipScale) : (editorState!.pipScale || DEFAULT_PIP_SCALE),
-          pipSnapPoint: (existing?.pipSnapPoint || 'br') as PipSnapPoint,
-          autoTrack: existing ? !!existing.autoTrack : false,
-          autoTrackSmoothing: existing?.autoTrackSmoothing || 0.15,
-          sectionId: section.id,
-          autoSection: true,
-          savedLandscape: existing?.savedLandscape ? { ...existing.savedLandscape } : null,
-          savedReel: existing?.savedReel ? { ...existing.savedReel } : null
-        };
-      });
-
-      editorState.keyframes = [...sectionAnchors, ...manual].sort((a, b) => a.time - b.time);
-
-      if (!editorState.sections.some(section => section.id === editorState!.selectedSectionId)) {
-        editorState.selectedSectionId = editorState.sections[0]!.id;
-      }
-    }
-
-    function selectEditorSection(sectionId: string): void {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return;
-      if (!editorState.sections.some(section => section.id === sectionId)) return;
-      commitSectionZoomChange();
-      editorState.selectedSectionId = sectionId;
       renderSectionMarkers();
-      updateSectionZoomControls();
-      updateEditorTimeDisplay();
-      scheduleProjectSave();
-    }
-
-    function selectOverlay(overlayId: string): void {
-      if (!editorState || !Array.isArray(editorState.overlays)) return;
-      if (!editorState.overlays.some(o => o.id === overlayId)) return;
-      editorState.selectedOverlayId = overlayId;
-      editorState.selectedAudioOverlayId = null;
-      renderOverlayMarkers();
-      renderAudioOverlayMarkers();
+    } else if (payload.status === 'error') {
+      proxyStatus.set(payload.takeId, { status: 'error' });
+      console.warn('[Proxy] Generation failed for take', payload.takeId, payload.error);
       renderSectionMarkers();
     }
+  });
+}
 
-    function updateOverlaySizeControl(): void {
-      if (!editorOverlaySizeControl) return;
-      const hasSelection = editorState && editorState.selectedOverlayId;
-      editorOverlaySizeControl.classList.toggle('hidden', !hasSelection);
-      editorOverlaySizeControl.classList.toggle('flex', !!hasSelection);
-      if (!hasSelection) return;
-      const overlay = editorState!.overlays.find(o => o.id === editorState!.selectedOverlayId);
-      if (!overlay) return;
-      const mode: 'reel' | 'landscape' = editorState!.outputMode === 'reel' ? 'reel' : 'landscape';
-      const baseW = mode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
-      const currentScale = overlay[mode].width / (baseW * 0.4);
-      editorOverlaySizeInput.value = String(Math.max(0.05, Math.min(5, currentScale)));
-      editorOverlaySizeValue.textContent = `${Math.round(currentScale * 100)}%`;
+async function _clearRecoveryTake(projectPath = activeProjectPath): Promise<void> {
+  if (!projectPath) return;
+  try {
+    await window.electronAPI.projectClearRecoveryTake(projectPath);
+  } catch (error) {
+    console.error('Failed to clear recovery take:', error);
+  }
+}
+
+function _deleteNearestKeyframe(): void {
+  if (!editorState || !Array.isArray(editorState.keyframes)) return;
+
+  const manualKeyframes = editorState.keyframes.filter((kf) => !kf.sectionId);
+  if (manualKeyframes.length === 0) return;
+
+  const currentTime = Number(editorState.currentTime) || 0;
+  let nearest = manualKeyframes[0]!;
+  let nearestDistance = Math.abs((Number(nearest.time) || 0) - currentTime);
+
+  for (let i = 1; i < manualKeyframes.length; i++) {
+    const candidate = manualKeyframes[i]!;
+    const distance = Math.abs((Number(candidate.time) || 0) - currentTime);
+    if (distance < nearestDistance) {
+      nearest = candidate;
+      nearestDistance = distance;
     }
+  }
 
-    function applyStyleToFutureSections(): void {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return;
+  const nearestTime = Number(nearest.time) || 0;
+  editorState.keyframes = editorState.keyframes.filter((kf) => {
+    if (kf.sectionId) return true;
+    const time = Number(kf.time) || 0;
+    return time !== nearestTime;
+  });
 
-      const currentSection = getSelectedSection();
-      if (!currentSection) return;
+  renderSectionMarkers();
+  editorSeek(currentTime);
+  updateEditorTimeDisplay();
+  scheduleProjectSave();
+}
 
-      const currentAnchor = getSectionAnchorKeyframe(currentSection.id, true);
-      if (!currentAnchor) return;
+// Sidebar tab switching
+if (sidebarTabSegments)
+  sidebarTabSegments.addEventListener('click', () => switchSidebarTab('segments'));
+if (sidebarTabOverlays)
+  sidebarTabOverlays.addEventListener('click', () => switchSidebarTab('overlays'));
 
-      const currentIndex = editorState.sections.findIndex(s => s.id === currentSection.id);
-      const futureSections = editorState.sections.slice(currentIndex + 1);
-      if (futureSections.length === 0) return;
+// === Audio overlay timeline, trim, split, delete ===
 
-      pushUndo();
-
-      for (const section of futureSections) {
-        const anchor = getSectionAnchorKeyframe(section.id, true);
-        if (!anchor) continue;
-        anchor.pipX = currentAnchor.pipX;
-        anchor.pipY = currentAnchor.pipY;
-        anchor.pipVisible = currentAnchor.pipVisible;
-        anchor.cameraFullscreen = currentAnchor.cameraFullscreen;
-        anchor.backgroundZoom = clampSectionZoom(currentAnchor.backgroundZoom);
-        anchor.backgroundPanX = clampSectionPan(currentAnchor.backgroundPanX);
-        anchor.backgroundPanY = clampSectionPan(currentAnchor.backgroundPanY);
-        anchor.reelCropX = clampReelCropX(currentAnchor.reelCropX);
-        anchor.pipScale = normalizePipScale(currentAnchor.pipScale);
-        anchor.pipSnapPoint = currentAnchor.pipSnapPoint || 'br';
-        anchor.autoTrack = !!currentAnchor.autoTrack;
-        anchor.autoTrackSmoothing = currentAnchor.autoTrackSmoothing || 0.15;
-        anchor.savedLandscape = currentAnchor.savedLandscape ? { ...currentAnchor.savedLandscape } : null;
-        anchor.savedReel = currentAnchor.savedReel ? { ...currentAnchor.savedReel } : null;
-      }
-
-      renderSectionMarkers();
-      updateSectionZoomControls();
-      editorSeek(editorState.currentTime);
-      updateEditorTimeDisplay();
-      scheduleProjectSave();
+// Audio track click & trim handlers
+if (editorAudioTrack0) {
+  editorAudioTrack0.addEventListener('mousedown', (e: MouseEvent) => {
+    if (!editorState) return;
+    const target = e.target as HTMLElement;
+    // Trim handle
+    const trimEdge = target.dataset.audioOverlayTrimEdge;
+    const trimId = target.dataset.audioOverlayId;
+    if (trimEdge && trimId) {
+      e.stopPropagation();
+      startAudioOverlayTrimDrag(e, trimId, trimEdge);
+      return;
     }
-
-    function _deleteNearestKeyframe(): void {
-      if (!editorState || !Array.isArray(editorState.keyframes)) return;
-
-      const manualKeyframes = editorState.keyframes.filter(kf => !kf.sectionId);
-      if (manualKeyframes.length === 0) return;
-
-      const currentTime = Number(editorState.currentTime) || 0;
-      let nearest = manualKeyframes[0]!;
-      let nearestDistance = Math.abs((Number(nearest.time) || 0) - currentTime);
-
-      for (let i = 1; i < manualKeyframes.length; i++) {
-        const candidate = manualKeyframes[i]!;
-        const distance = Math.abs((Number(candidate.time) || 0) - currentTime);
-        if (distance < nearestDistance) {
-          nearest = candidate;
-          nearestDistance = distance;
-        }
-      }
-
-      const nearestTime = Number(nearest.time) || 0;
-      editorState.keyframes = editorState.keyframes.filter((kf) => {
-        if (kf.sectionId) return true;
-        const time = Number(kf.time) || 0;
-        return time !== nearestTime;
-      });
-
-      renderSectionMarkers();
-      editorSeek(currentTime);
-      updateEditorTimeDisplay();
-      scheduleProjectSave();
+    // Segment click
+    const bandEl = target.closest('[data-audio-overlay-id]') as HTMLElement | null;
+    if (bandEl) {
+      const aoId = bandEl.dataset.audioOverlayId;
+      if (aoId) selectAudioOverlay(aoId);
+      return;
     }
-
-    function renderSectionTranscriptList(): void {
-      const activeSections = editorState?.sections || [];
-      const savedSections = editorState?.savedSections || [];
-
-      if (activeSections.length === 0 && savedSections.length === 0) {
-        editorSectionTranscriptList.innerHTML = '<div class="text-xs text-neutral-500 px-1">No sections available.</div>';
-        return;
-      }
-
-      const activeItems = activeSections.map(s => ({ section: s, isRemoved: false }));
-      const savedItems = savedSections.map(s => ({ section: s, isRemoved: true }));
-      const allItems = [...activeItems, ...savedItems].sort((a, b) => {
-        const timeDiff = a.section.start - b.section.start;
-        if (timeDiff !== 0) return timeDiff;
-        if (a.isRemoved !== b.isRemoved) return a.isRemoved ? -1 : 1;
-        return 0;
-      });
-
-      editorSectionTranscriptList.innerHTML = '';
-      for (const { section, isRemoved } of allItems) {
-        const selected = !isRemoved && section.id === editorState!.selectedSectionId;
-        const transcript = normalizeTranscriptText(section.transcript);
-
-        const row = document.createElement('div');
-        row.dataset.sectionId = section.id;
-        row.className = `w-full text-left rounded-lg px-3 py-2 transition-all ${selected ? 'bg-neutral-800' : isRemoved ? '' : 'hover:bg-neutral-900 cursor-pointer'}`;
-
-        const meta = document.createElement('div');
-        meta.className = 'text-xs text-neutral-500 font-mono tabular-nums flex items-center justify-between';
-
-        const metaLabel = document.createElement('span');
-        if (isRemoved) metaLabel.style.opacity = '0.5';
-        metaLabel.textContent = `${section.label} (${formatTime(section.start)} - ${formatTime(section.end)})`;
-        meta.appendChild(metaLabel);
-
-        const metaActions = document.createElement('span');
-        metaActions.className = 'flex items-center gap-1 ml-2';
-
-        metaActions.appendChild(buildVolumeHeartStack({
-          id: section.id,
-          volume: section.volume,
-          saved: section.saved,
-          isRemoved,
-          onVolumeChange: (newVol) => { section.volume = newVol; scheduleProjectSave(); },
-          onHeartClick: () => toggleSectionSaved(section.id)
-        }));
-
-        if (isRemoved) {
-          const readdBtn = document.createElement('button');
-          readdBtn.type = 'button';
-          readdBtn.className = 'hover:text-green-400 transition-colors leading-none flex items-center';
-          readdBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
-          readdBtn.title = 'Re-add to timeline';
-          readdBtn.addEventListener('click', (e: MouseEvent) => {
-            e.stopPropagation();
-            readdSavedSection(section.id);
-          });
-          metaActions.appendChild(readdBtn);
-        }
-
-        meta.appendChild(metaActions);
-
-        const text = document.createElement('div');
-        text.className = `mt-1 text-sm leading-snug ${transcript ? 'text-neutral-300' : 'text-neutral-600 italic'}`;
-        if (isRemoved) text.style.opacity = '0.5';
-        text.textContent = transcript || 'No transcript captured for this section.';
-
-        row.appendChild(meta);
-        row.appendChild(text);
-
-        if (!isRemoved) {
-          row.style.cursor = 'pointer';
-          row.addEventListener('click', () => {
-            selectEditorSection(section.id);
-          });
-        }
-
-        editorSectionTranscriptList.appendChild(row);
-      }
-    }
-
-    // Sidebar tab switching
-    let activeSidebarTab = 'segments';
-    function switchSidebarTab(tab: string): void {
-      activeSidebarTab = tab;
-      const isSegments = tab === 'segments';
-      if (sidebarTabSegments) sidebarTabSegments.className = `flex-1 px-2 py-1 text-xs transition-colors ${isSegments ? 'bg-white text-black' : 'text-neutral-400 hover:text-neutral-200'}`;
-      if (sidebarTabOverlays) sidebarTabOverlays.className = `flex-1 px-2 py-1 text-xs transition-colors ${!isSegments ? 'bg-indigo-600 text-white' : 'text-neutral-400 hover:text-neutral-200'}`;
-      editorSectionTranscriptList.classList.toggle('hidden', !isSegments);
-      if (editorOverlayList) editorOverlayList.classList.toggle('hidden', isSegments);
-      if (!isSegments) renderOverlayList();
-    }
-    if (sidebarTabSegments) sidebarTabSegments.addEventListener('click', () => switchSidebarTab('segments'));
-    if (sidebarTabOverlays) sidebarTabOverlays.addEventListener('click', () => switchSidebarTab('overlays'));
-
-    const VOL_SVG_MUTE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
-    const VOL_SVG_LOW = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 010 7.07"/></svg>';
-    const VOL_SVG_HIGH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 010 7.07"/><path d="M19.07 4.93a10 10 0 010 14.14"/></svg>';
-
-    function getVolumeSvg(vol: number): string {
-      if (vol <= 0) return VOL_SVG_MUTE;
-      if (vol <= 0.5) return VOL_SVG_LOW;
-      return VOL_SVG_HIGH;
-    }
-
-    const preMuteVolumes = new Map<string, number>();
-
-    interface VolumeHeartOpts {
-      id: string;
-      volume: number;
-      saved: boolean;
-      isRemoved: boolean;
-      onVolumeChange: (newVol: number) => void;
-      onHeartClick: () => void;
-    }
-
-    function buildVolumeHeartStack(opts: VolumeHeartOpts): HTMLElement {
-      const container = document.createElement('span');
-      container.className = 'flex flex-col items-center gap-1';
-
-      // Heart button
-      const heartBtn = document.createElement('button');
-      heartBtn.type = 'button';
-      heartBtn.className = 'hover:text-red-400 transition-colors leading-none flex items-center';
-      heartBtn.innerHTML = opts.saved
-        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>'
-        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
-      heartBtn.title = opts.saved ? 'Unsave' : 'Save';
-      heartBtn.addEventListener('click', (e: MouseEvent) => {
-        e.stopPropagation();
-        opts.onHeartClick();
-      });
-      container.appendChild(heartBtn);
-
-      // Volume row (only for active items)
-      if (!opts.isRemoved) {
-        const volWrap = document.createElement('span');
-        volWrap.className = 'flex items-center gap-1 select-none';
-
-        const volIcon = document.createElement('button');
-        volIcon.type = 'button';
-        volIcon.className = 'text-neutral-400 hover:text-neutral-200 transition-colors leading-none flex items-center';
-        volIcon.innerHTML = getVolumeSvg(opts.volume);
-        volIcon.title = opts.volume > 0 ? 'Mute' : 'Unmute';
-
-        const volValue = document.createElement('span');
-        volValue.className = 'text-xs font-mono tabular-nums text-neutral-300 min-w-[32px] text-right cursor-ew-resize';
-        volValue.textContent = opts.volume.toFixed(2);
-
-        const volInput = document.createElement('input');
-        volInput.type = 'range';
-        volInput.min = '0';
-        volInput.max = '1';
-        volInput.step = '0.01';
-        volInput.value = String(opts.volume);
-        volInput.className = 'hidden';
-
-        // Click to toggle mute
-        volIcon.addEventListener('click', (e: MouseEvent) => {
-          e.stopPropagation();
-          let newVol: number;
-          if (opts.volume > 0) {
-            preMuteVolumes.set(opts.id, opts.volume);
-            newVol = 0;
-          } else {
-            newVol = preMuteVolumes.get(opts.id) || 1.0;
-            preMuteVolumes.delete(opts.id);
-          }
-          volInput.value = String(newVol);
-          volInput.dispatchEvent(new Event('input'));
-          volInput.dispatchEvent(new Event('change'));
-        });
-
-        volWrap.appendChild(volIcon);
-        volWrap.appendChild(volValue);
-        volWrap.appendChild(volInput);
-        container.appendChild(volWrap);
-
-        // Drag to scrub on value label
-        initScrubDrag(volValue, null, volInput);
-
-        let dragActive = false;
-        volInput.addEventListener('input', () => {
-          const newVol = Math.max(0, Math.min(1, parseFloat(volInput.value)));
-          if (!dragActive) { pushUndo(); dragActive = true; }
-          opts.volume = newVol;
-          volValue.textContent = newVol.toFixed(2);
-          volIcon.innerHTML = getVolumeSvg(newVol);
-          volIcon.title = newVol > 0 ? 'Mute' : 'Unmute';
-          opts.onVolumeChange(newVol);
-        });
-        volInput.addEventListener('change', () => { dragActive = false; });
-      }
-
-      return container;
-    }
-
-    function renderOverlayList(): void {
-      if (!editorOverlayList) return;
-      const activeOverlays = editorState?.overlays || [];
-      const savedOverlays = editorState?.savedOverlays || [];
-      const activeAudioOverlays = editorState?.audioOverlays || [];
-      const savedAudioOverlays = editorState?.savedAudioOverlays || [];
-
-      if (activeOverlays.length === 0 && savedOverlays.length === 0 && activeAudioOverlays.length === 0 && savedAudioOverlays.length === 0) {
-        editorOverlayList.innerHTML = '<div class="text-xs text-neutral-500 px-1">Drop media onto the canvas to add overlays.</div>';
-        return;
-      }
-
-      const activeItems = activeOverlays.map(o => ({ overlay: o, isRemoved: false }));
-      const savedItems = savedOverlays.map(o => ({ overlay: o, isRemoved: true }));
-      const allItems = [...activeItems, ...savedItems].sort((a, b) => a.overlay.startTime - b.overlay.startTime);
-
-      editorOverlayList.innerHTML = '';
-      for (const { overlay, isRemoved } of allItems) {
-        const selected = !isRemoved && overlay.id === editorState!.selectedOverlayId;
-        const fileName = overlay.mediaPath.split('/').pop() || '';
-        const icon = overlay.mediaType === 'video' ? '\u25B6' : '\u25A3';
-
-        const row = document.createElement('div');
-        row.dataset.overlayId = overlay.id;
-        row.className = `w-full text-left rounded-lg px-3 py-2 transition-all ${selected ? 'bg-indigo-900/40' : isRemoved ? '' : 'hover:bg-neutral-900 cursor-pointer'}`;
-
-        const meta = document.createElement('div');
-        meta.className = 'text-xs text-neutral-500 font-mono tabular-nums flex items-center justify-between';
-
-        const metaLabel = document.createElement('span');
-        if (isRemoved) metaLabel.style.opacity = '0.5';
-        metaLabel.textContent = `${icon} ${formatTime(overlay.startTime)} - ${formatTime(overlay.endTime)}`;
-        meta.appendChild(metaLabel);
-
-        const metaActions = document.createElement('span');
-        metaActions.className = 'flex items-center gap-1 ml-2';
-
-        const heartBtn = document.createElement('button');
-        heartBtn.type = 'button';
-        heartBtn.className = 'hover:text-red-400 transition-colors leading-none flex items-center';
-        heartBtn.innerHTML = overlay.saved
-          ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>'
-          : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
-        heartBtn.title = overlay.saved ? 'Unsave overlay' : 'Save overlay';
-        heartBtn.addEventListener('click', (e: MouseEvent) => {
-          e.stopPropagation();
-          toggleOverlaySaved(overlay.id);
-        });
-        metaActions.appendChild(heartBtn);
-
-        if (isRemoved) {
-          const readdBtn = document.createElement('button');
-          readdBtn.type = 'button';
-          readdBtn.className = 'hover:text-green-400 transition-colors leading-none flex items-center';
-          readdBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
-          readdBtn.title = 'Re-add to timeline';
-          readdBtn.addEventListener('click', (e: MouseEvent) => {
-            e.stopPropagation();
-            readdSavedOverlay(overlay.id);
-          });
-          metaActions.appendChild(readdBtn);
-        }
-
-        meta.appendChild(metaActions);
-
-        const text = document.createElement('div');
-        text.className = `mt-1 text-sm leading-snug truncate ${isRemoved ? 'text-neutral-600' : 'text-neutral-300'}`;
-        if (isRemoved) text.style.opacity = '0.5';
-        text.textContent = fileName;
-
-        row.appendChild(meta);
-        row.appendChild(text);
-
-        if (!isRemoved) {
-          row.addEventListener('click', () => {
-            selectOverlay(overlay.id);
-            editorSeek(overlay.startTime);
-          });
-        }
-
-        editorOverlayList.appendChild(row);
-      }
-
-      // Audio overlay section
-      if (activeAudioOverlays.length > 0 || savedAudioOverlays.length > 0) {
-        const header = document.createElement('div');
-        header.className = 'text-[10px] font-semibold text-neutral-500 uppercase tracking-wider px-1 pt-2 pb-1';
-        header.textContent = 'Audio';
-        editorOverlayList.appendChild(header);
-
-        const audioActiveItems = activeAudioOverlays.map(ao => ({ ao, isRemoved: false }));
-        const audioSavedItems = savedAudioOverlays.map(ao => ({ ao, isRemoved: true }));
-        const allAudioItems = [...audioActiveItems, ...audioSavedItems].sort((a, b) => a.ao.startTime - b.ao.startTime);
-
-        for (const { ao, isRemoved } of allAudioItems) {
-          const selected = !isRemoved && ao.id === editorState!.selectedAudioOverlayId;
-          const fileName = ao.mediaPath.split('/').pop() || '';
-
-          const row = document.createElement('div');
-          row.dataset.audioOverlayId = ao.id;
-          row.className = `w-full text-left rounded-lg px-3 py-2 transition-all ${selected ? 'bg-teal-900/40' : isRemoved ? '' : 'hover:bg-neutral-900 cursor-pointer'}`;
-
-          const meta = document.createElement('div');
-          meta.className = 'text-xs text-neutral-500 font-mono tabular-nums flex items-center justify-between';
-
-          const metaLabel = document.createElement('span');
-          if (isRemoved) metaLabel.style.opacity = '0.5';
-          metaLabel.textContent = `\u266B ${formatTime(ao.startTime)} - ${formatTime(ao.endTime)}`;
-          meta.appendChild(metaLabel);
-
-          const metaActions = document.createElement('span');
-          metaActions.className = 'flex items-center gap-1 ml-2';
-
-          metaActions.appendChild(buildVolumeHeartStack({
-            id: ao.id,
-            volume: ao.volume,
-            saved: ao.saved,
-            isRemoved,
-            onVolumeChange: (newVol) => { ao.volume = newVol; scheduleProjectSave(); },
-            onHeartClick: () => toggleAudioOverlaySaved(ao.id)
-          }));
-
-          if (isRemoved) {
-            const readdBtn = document.createElement('button');
-            readdBtn.type = 'button';
-            readdBtn.className = 'hover:text-green-400 transition-colors leading-none flex items-center';
-            readdBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
-            readdBtn.title = 'Re-add to timeline';
-            readdBtn.addEventListener('click', (e: MouseEvent) => {
-              e.stopPropagation();
-              readdSavedAudioOverlay(ao.id);
-            });
-            metaActions.appendChild(readdBtn);
-          }
-
-          meta.appendChild(metaActions);
-
-          const text = document.createElement('div');
-          text.className = `mt-1 text-sm leading-snug truncate ${isRemoved ? 'text-neutral-600' : 'text-neutral-300'}`;
-          if (isRemoved) text.style.opacity = '0.5';
-          text.textContent = fileName;
-
-          row.appendChild(meta);
-          row.appendChild(text);
-
-          if (!isRemoved) {
-            row.addEventListener('click', () => {
-              selectAudioOverlay(ao.id);
-              editorSeek(ao.startTime);
-            });
-          }
-
-          editorOverlayList.appendChild(row);
-        }
-      }
-    }
-
-    async function toggleAudioOverlaySaved(audioOverlayId: string): Promise<void> {
-      if (!editorState) return;
-
-      const activeAo = editorState.audioOverlays.find(o => o.id === audioOverlayId);
-      if (activeAo) {
-        pushUndo();
-        activeAo.saved = !activeAo.saved;
-        renderOverlayList();
-        scheduleProjectSave();
-        return;
-      }
-
-      const savedAo = editorState.savedAudioOverlays.find(o => o.id === audioOverlayId);
-      if (savedAo) {
-        pushUndo();
-        const idx = editorState.savedAudioOverlays.indexOf(savedAo);
-        editorState.savedAudioOverlays.splice(idx, 1);
-        // Check if media file is still referenced
-        const stillReferenced = editorState.audioOverlays.some(o => o.mediaPath === savedAo.mediaPath)
-          || editorState.savedAudioOverlays.some(o => o.mediaPath === savedAo.mediaPath);
-        if (!stillReferenced && activeProjectPath) {
-          await window.electronAPI.stageAudioOverlayFile(activeProjectPath, savedAo.mediaPath).catch(() => {});
-        }
-        renderOverlayList();
-        scheduleProjectSave();
-      }
-    }
-
-    function readdSavedAudioOverlay(audioOverlayId: string): void {
-      if (!editorState) return;
-      const idx = editorState.savedAudioOverlays.findIndex(o => o.id === audioOverlayId);
-      if (idx < 0) return;
-      pushUndo();
-      const ao = editorState.savedAudioOverlays.splice(idx, 1)[0]!;
-      // Try to place at original position
-      const placedStart = placeAudioOverlayAtTime(ao.startTime, ao.endTime - ao.startTime, editorState.duration, ao.trackIndex || 0);
-      if (placedStart !== null) {
-        ao.startTime = placedStart;
-        ao.endTime = placedStart + (ao.endTime - ao.startTime);
-      }
-      editorState.audioOverlays.push(ao);
-      editorState.audioOverlays.sort((a, b) => a.startTime - b.startTime);
-      editorState.selectedAudioOverlayId = ao.id;
-      renderAudioOverlayMarkers();
-      renderOverlayList();
-      scheduleProjectSave();
-    }
-
-    async function toggleOverlaySaved(overlayId: string): Promise<void> {
-      if (!editorState) return;
-
-      const activeOverlay = editorState.overlays.find(o => o.id === overlayId);
-      if (activeOverlay) {
-        pushUndo();
-        activeOverlay.saved = !activeOverlay.saved;
-        renderOverlayList();
-        scheduleProjectSave();
-        return;
-      }
-
-      const savedIdx = editorState.savedOverlays.findIndex(o => o.id === overlayId);
-      if (savedIdx >= 0) {
-        pushUndo();
-        const removed = editorState.savedOverlays.splice(savedIdx, 1)[0]!;
-        const stillReferenced = editorState.overlays.some(o => o.mediaPath === removed.mediaPath)
-          || editorState.savedOverlays.some(o => o.mediaPath === removed.mediaPath);
-        if (!stillReferenced && activeProjectPath) {
-          await window.electronAPI.stageOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-        }
-        renderOverlayList();
-        scheduleProjectSave();
-      }
-    }
-
-    function readdSavedOverlay(overlayId: string): void {
-      if (!editorState) return;
-      const savedIdx = editorState.savedOverlays.findIndex(o => o.id === overlayId);
-      if (savedIdx < 0) return;
-
-      pushUndo();
-      const overlay = editorState.savedOverlays.splice(savedIdx, 1)[0]!;
-      overlay.saved = true;
-
-      const duration = overlay.endTime - overlay.startTime;
-      const placed = placeOverlayAtTime(null, overlay.startTime, duration, editorState.duration, overlay.trackIndex || 0);
-      if (placed !== null) {
-        overlay.startTime = placed;
-        overlay.endTime = placed + duration;
-      }
-
-      editorState.overlays.push(overlay);
-      editorState.overlays.sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0) || a.startTime - b.startTime);
-      editorState.selectedOverlayId = overlay.id;
-      renderOverlayMarkers();
-      renderOverlayList();
-      scheduleProjectSave();
-    }
-
-    function computeWaveformPeaksFromCache(numBuckets = 800): Float32Array | null {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return null;
-      const totalDuration = editorState.duration;
-      if (totalDuration <= 0) return null;
-
-      const peaks = new Float32Array(numBuckets);
-      for (let bucket = 0; bucket < numBuckets; bucket++) {
-        const bucketStart = (bucket / numBuckets) * totalDuration;
-        const bucketEnd = ((bucket + 1) / numBuckets) * totalDuration;
-        let maxPeak = 0;
-
-        for (const section of editorState.sections) {
-          if (bucketEnd <= section.start || bucketStart >= section.end) continue;
-          const overlapStart = Math.max(bucketStart, section.start);
-          const overlapEnd = Math.min(bucketEnd, section.end);
-          const sourceStart = section.sourceStart + (overlapStart - section.start);
-          const sourceEnd = section.sourceStart + (overlapEnd - section.start);
-
-          const audioBuffer = takeAudioBufferCache.get(section.takeId!);
-          if (!audioBuffer) continue;
-          const channelData = audioBuffer.getChannelData(0);
-          const sampleRate = audioBuffer.sampleRate;
-          const startSample = Math.floor(sourceStart * sampleRate);
-          const endSample = Math.min(Math.ceil(sourceEnd * sampleRate), channelData.length);
-
-          for (let j = startSample; j < endSample; j++) {
-            const abs = Math.abs(channelData[j]!);
-            if (abs > maxPeak) maxPeak = abs;
-          }
-        }
-        peaks[bucket] = maxPeak;
-      }
-      return peaks;
-    }
-
-    function refreshWaveform(): void {
-      if (!editorState) return;
-      waveformPeaks = computeWaveformPeaksFromCache(Math.round(800 * timelineZoom));
-      renderWaveform();
-    }
-
-    async function extractWaveformPeaks(numBuckets = 800): Promise<Float32Array | null> {
-      if (!editorState || !editorState.sections || editorState.sections.length === 0) return null;
-
-      try {
-        for (const section of editorState.sections) {
-          if (!section.takeId || takeAudioBufferCache.has(section.takeId)) continue;
-          const take = activeProject?.takes?.find((t: Take) => t.id === section.takeId);
-          if (!take) continue;
-          try {
-            const url = pathToFileUrl(take.screenPath);
-            const response = await fetch(url);
-            const arrayBuffer = await response.arrayBuffer();
-            const offlineCtx = new OfflineAudioContext(1, 1, 44100);
-            const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
-            takeAudioBufferCache.set(section.takeId, audioBuffer);
-          } catch (err) {
-            console.warn(`Failed to decode audio for take ${section.takeId}:`, err);
-          }
-        }
-
-        return computeWaveformPeaksFromCache(numBuckets);
-      } catch (err) {
-        console.warn('Failed to extract waveform:', err);
-        return null;
-      }
-    }
-
-    function renderWaveform(): void {
-      const wfCanvas = editorWaveformCanvas;
-      const rect = wfCanvas.parentElement!.getBoundingClientRect();
-      wfCanvas.width = Math.round(rect.width * devicePixelRatio);
-      wfCanvas.height = Math.round(rect.height * devicePixelRatio);
-      const wCtx = wfCanvas.getContext('2d')!;
-      wCtx.clearRect(0, 0, wfCanvas.width, wfCanvas.height);
-      if (!waveformPeaks || waveformPeaks.length === 0) return;
-
-      const w = wfCanvas.width;
-      const h = wfCanvas.height;
-      const midY = h / 2;
-      const barWidth = w / waveformPeaks.length;
-
-      wCtx.fillStyle = 'rgba(163, 163, 163, 0.5)';
-      for (let i = 0; i < waveformPeaks.length; i++) {
-        const barHeight = waveformPeaks[i]! * midY * 0.9;
-        const x = i * barWidth;
-        wCtx.fillRect(x, midY - barHeight, Math.max(1, barWidth - 0.5), barHeight * 2);
-      }
-    }
-
-    function renderSectionMarkers(): void {
-      if (!editorState || !editorState.duration || !editorState.sections || editorState.sections.length === 0) {
-        editorSectionMarkers.innerHTML = '';
-        renderSectionTranscriptList();
-        return;
-      }
-
-      editorSectionMarkers.innerHTML = '';
-      for (const section of editorState.sections) {
-        const sectionStart = (section.start / editorState.duration) * 100;
-        const sectionWidth = Math.max(0.35, ((section.end - section.start) / editorState.duration) * 100);
-        const selected = section.id === editorState.selectedSectionId;
-        const baseColor = section.index % 2 === 0 ? 'rgba(23,23,23,0.72)' : 'rgba(38,38,38,0.68)';
-
-        const band = document.createElement('div');
-        band.className = 'absolute top-0 bottom-0';
-        band.dataset.sectionId = section.id;
-        band.style.left = sectionStart + '%';
-        band.style.width = sectionWidth + '%';
-        band.style.backgroundColor = selected ? 'rgba(255,255,255,0.12)' : baseColor;
-        band.style.borderLeft = section.index === 0 ? 'none' : '1px solid rgba(10,10,10,0.9)';
-        if (selected) {
-          band.style.boxShadow = 'inset 0 0 0 2px rgba(255,255,255,0.3)';
-        }
-        const transcriptPreview = normalizeTranscriptText(section.transcript);
-        band.title = transcriptPreview
-          ? `${section.label}: ${formatTime(section.start)} - ${formatTime(section.end)}\n${transcriptPreview}`
-          : `${section.label}: ${formatTime(section.start)} - ${formatTime(section.end)}`;
-        const label = document.createElement('div');
-        label.className = 'absolute text-[10px] font-medium pointer-events-none';
-        label.style.left = '6px';
-        label.style.top = '50%';
-        label.style.transform = 'translateY(-50%)';
-        label.style.color = selected ? 'rgba(255,255,255,0.9)' : 'rgba(163,163,163,0.8)';
-        label.textContent = String(section.index + 1);
-        band.appendChild(label);
-        if (selected) {
-          const leftHandle = document.createElement('div');
-          leftHandle.dataset.trimEdge = 'left';
-          leftHandle.dataset.sectionId = section.id;
-          leftHandle.style.cssText = 'position:absolute;top:0;bottom:0;left:0;width:6px;cursor:col-resize;z-index:30;border-left:3px solid rgba(255,255,255,0.5);';
-          band.appendChild(leftHandle);
-          const rightHandle = document.createElement('div');
-          rightHandle.dataset.trimEdge = 'right';
-          rightHandle.dataset.sectionId = section.id;
-          rightHandle.style.cssText = 'position:absolute;top:0;bottom:0;right:0;width:6px;cursor:col-resize;z-index:30;border-right:3px solid rgba(255,255,255,0.5);';
-          band.appendChild(rightHandle);
-        }
-
-        const takeProxy = proxyStatus.get(section.takeId!);
-        if (takeProxy && takeProxy.status === 'pending') {
-          const pct = Math.round((takeProxy.percent || 0) * 100);
-          const proxyBar = document.createElement('div');
-          proxyBar.className = 'absolute bottom-0 left-0 pointer-events-none';
-          proxyBar.dataset.proxyBar = section.takeId!;
-          proxyBar.style.cssText = `height:3px;width:${pct}%;background:rgba(251,191,36,0.85);z-index:10;transition:width 0.3s ease;`;
-          proxyBar.title = `Optimizing for editing\u2026 ${pct}%`;
-          band.appendChild(proxyBar);
-        }
-
-        editorSectionMarkers.appendChild(band);
-
-        if (section.index < editorState.sections.length - 1) {
-          const cut = document.createElement('div');
-          cut.className = 'absolute top-0 bottom-0 pointer-events-none';
-          cut.style.left = `${(section.end / editorState.duration) * 100}%`;
-          cut.style.width = '3px';
-          cut.style.transform = 'translateX(-1.5px)';
-          cut.style.backgroundColor = 'rgba(255,255,255,0.25)';
-          editorSectionMarkers.appendChild(cut);
-        }
-      }
-      renderSectionTranscriptList();
-      renderOverlayMarkers();
-      renderAudioOverlayMarkers();
-    }
-
-    function updateProxyProgressBars(takeId: string, percent: number): void {
-      const pct = Math.round(percent * 100);
-      const bars = editorSectionMarkers.querySelectorAll(`[data-proxy-bar="${takeId}"]`);
-      for (const bar of Array.from(bars)) {
-        (bar as HTMLElement).style.width = `${pct}%`;
-        (bar as HTMLElement).title = `Optimizing for editing\u2026 ${pct}%`;
-      }
-    }
-
-    function renderOverlayMarkers(): void {
-      const TRACK_COLORS = ['#3B82F6', '#22C55E', '#6366F1', '#6366F1'];
-
-      // Clear all 4 tracks
-      for (const tel of overlayTrackEls) {
-        if (tel) tel.innerHTML = '';
-      }
-
-      // Determine which tracks have overlays for visibility toggling
-      const tracksWithOverlays = new Set<number>();
-      if (editorState && Array.isArray(editorState.overlays)) {
-        for (const o of editorState.overlays) {
-          tracksWithOverlays.add(o.trackIndex || 0);
-        }
-      }
-      for (let t = 0; t < 4; t++) {
-        const el = overlayTrackEls[t];
-        if (el) {
-          el.classList.toggle('hidden', !tracksWithOverlays.has(t));
-        }
-      }
-
-      if (!editorState || !editorState.duration || !Array.isArray(editorState.overlays) || editorState.overlays.length === 0) {
-        updateOverlaySizeControl();
-        if (activeSidebarTab === 'overlays') renderOverlayList();
-        return;
-      }
-
-      for (const overlay of editorState.overlays) {
-        const trackIdx = overlay.trackIndex || 0;
-        const trackColor = TRACK_COLORS[Math.min(trackIdx, 3)] || '#6366F1';
-        const pctLeft = (overlay.startTime / editorState.duration) * 100;
-        const pctWidth = Math.max(0.35, ((overlay.endTime - overlay.startTime) / editorState.duration) * 100);
-        const selected = overlay.id === editorState.selectedOverlayId;
-
-        const band = document.createElement('div');
-        band.className = 'absolute top-0 bottom-0';
-        band.dataset.overlayId = overlay.id;
-        band.style.left = pctLeft + '%';
-        band.style.width = pctWidth + '%';
-        band.style.backgroundColor = selected ? hexToRgba(trackColor, 0.45) : hexToRgba(trackColor, 0.22);
-        band.style.borderRadius = '3px';
-        band.style.cursor = 'pointer';
-        if (selected) {
-          band.style.boxShadow = `inset 0 0 0 2px ${hexToRgba(trackColor, 0.6)}`;
-        }
-
-        // Label: for window overlays, show sourceName; otherwise filename + icon
-        let displayLabel: string;
-        let displayTitle: string;
-        if (overlay.mediaType === 'window') {
-          const wName = overlay.sourceName || 'Window';
-          const icon = '\u25A1'; // window icon
-          displayLabel = `${icon} ${wName}`;
-          displayTitle = `${icon} ${wName}: ${formatTime(overlay.startTime)} - ${formatTime(overlay.endTime)}`;
-        } else {
-          const fileName = overlay.mediaPath.split('/').pop() || '';
-          const icon = overlay.mediaType === 'video' ? '\u25B6' : '\u25A3';
-          displayLabel = `${icon} ${fileName}`;
-          displayTitle = `${icon} ${fileName}: ${formatTime(overlay.startTime)} - ${formatTime(overlay.endTime)}`;
-        }
-        band.title = displayTitle;
-
-        const label = document.createElement('div');
-        label.className = 'absolute text-[9px] font-medium pointer-events-none truncate';
-        label.style.cssText = 'left:4px;right:4px;top:50%;transform:translateY(-50%);';
-        label.style.color = selected ? hexToRgba(trackColor, 0.95) : hexToRgba(trackColor, 0.75);
-        label.textContent = displayLabel;
-        band.appendChild(label);
-
-        if (selected) {
-          const leftHandle = document.createElement('div');
-          leftHandle.dataset.overlayTrimEdge = 'left';
-          leftHandle.dataset.overlayId = overlay.id;
-          leftHandle.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:6px;cursor:col-resize;z-index:30;border-left:3px solid ${hexToRgba(trackColor, 0.7)};`;
-          band.appendChild(leftHandle);
-          const rightHandle = document.createElement('div');
-          rightHandle.dataset.overlayTrimEdge = 'right';
-          rightHandle.dataset.overlayId = overlay.id;
-          rightHandle.style.cssText = `position:absolute;top:0;bottom:0;right:0;width:6px;cursor:col-resize;z-index:30;border-right:3px solid ${hexToRgba(trackColor, 0.7)};`;
-          band.appendChild(rightHandle);
-        }
-
-        const trackEl = overlayTrackEls[Math.min(trackIdx, 3)] || overlayTrackEls[0]!;
-        trackEl.appendChild(band);
-      }
-      updateOverlaySizeControl();
-      if (activeSidebarTab === 'overlays') renderOverlayList();
-    }
-
-    /** Convert hex color (#RRGGBB) to rgba string */
-    function hexToRgba(hex: string, alpha: number): string {
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      return `rgba(${r},${g},${b},${alpha})`;
-    }
-
-    // === Overlay trim, split, delete ===
-
-    let overlayTrimDragState: OverlayTrimDragState | null = null;
-
-    function startOverlayTrimDrag(e: MouseEvent, overlayId: string, edge: string): void {
-      const overlay = editorState!.overlays.find(o => o.id === overlayId);
-      if (!overlay) return;
-      pushUndo();
-      overlayTrimDragState = {
-        overlayId,
-        edge,
-        startX: e.clientX,
-        originalStartTime: overlay.startTime,
-        originalEndTime: overlay.endTime,
-        originalSourceStart: overlay.sourceStart,
-        originalSourceEnd: overlay.sourceEnd
-      };
-      const onMove = (e2: MouseEvent) => updateOverlayTrimDrag(e2);
-      const onUp = () => {
-        overlayTrimDragState = null;
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        renderOverlayMarkers();
-        scheduleProjectSave();
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    }
-
-    function updateOverlayTrimDrag(e: MouseEvent): void {
-      if (!overlayTrimDragState || !editorState) return;
-      const overlay = editorState.overlays.find(o => o.id === overlayTrimDragState!.overlayId);
-      if (!overlay) return;
-      const rect = editorTimeline.getBoundingClientRect();
-      const pxPerSec = rect.width / editorState.duration;
-      const deltaSec = (e.clientX - overlayTrimDragState.startX) / pxPerSec;
-      const sameTrack = editorState.overlays.filter(o => (o.trackIndex || 0) === (overlay.trackIndex || 0));
-      const idxInTrack = sameTrack.indexOf(overlay);
-      const prevEnd = idxInTrack > 0 ? sameTrack[idxInTrack - 1]!.endTime : 0;
-      const nextStart = idxInTrack < sameTrack.length - 1 ? sameTrack[idxInTrack + 1]!.startTime : editorState.duration;
-
-      const isVideoLikeTrim = overlay.mediaType === 'video' || overlay.mediaType === 'window';
-      if (overlayTrimDragState.edge === 'left') {
-        const newStart = Math.max(prevEnd, Math.min(overlay.endTime - 0.1, overlayTrimDragState.originalStartTime + deltaSec));
-        const shift = newStart - overlayTrimDragState.originalStartTime;
-        overlay.startTime = newStart;
-        if (isVideoLikeTrim) {
-          overlay.sourceStart = Math.max(0, overlayTrimDragState.originalSourceStart + shift);
-        }
-      } else {
-        const newEnd = Math.min(nextStart, Math.max(overlay.startTime + 0.1, overlayTrimDragState.originalEndTime + deltaSec));
-        const shift = newEnd - overlayTrimDragState.originalEndTime;
-        overlay.endTime = newEnd;
-        if (isVideoLikeTrim) {
-          overlay.sourceEnd = Math.max(overlay.sourceStart + 0.1, overlayTrimDragState.originalSourceEnd + shift);
-        }
-      }
-      renderOverlayMarkers();
-    }
-
-    function splitOverlayAtPlayhead(): void {
-      if (!editorState || !editorState.selectedOverlayId) return;
-      const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-      if (!overlay) return;
-      const time = editorState.currentTime;
-      if (time <= overlay.startTime + 0.1 || time >= overlay.endTime - 0.1) return;
-      pushUndo();
-
-      const splitSourceTime = overlay.sourceStart + (time - overlay.startTime);
-      const isVideoLike = overlay.mediaType === 'video' || overlay.mediaType === 'window';
-      const newOverlay: Overlay = {
-        id: generateOverlayId(),
-        trackIndex: overlay.trackIndex || 0,
-        mediaPath: overlay.mediaPath,
-        mediaType: overlay.mediaType,
-        startTime: time,
-        endTime: overlay.endTime,
-        sourceStart: isVideoLike ? splitSourceTime : 0,
-        sourceEnd: overlay.sourceEnd,
-        landscape: { ...overlay.landscape },
-        reel: { ...overlay.reel },
-        saved: false,
-        // Preserve window-specific fields
-        ...(overlay.sourceName ? { sourceName: overlay.sourceName } : {}),
-        ...(overlay.sourceWidth ? { sourceWidth: overlay.sourceWidth } : {}),
-        ...(overlay.sourceHeight ? { sourceHeight: overlay.sourceHeight } : {}),
-        ...(overlay.proxyPath ? { proxyPath: overlay.proxyPath } : {})
-      };
-      overlay.endTime = time;
-      if (isVideoLike) {
-        overlay.sourceEnd = splitSourceTime;
-      }
-      const idx = editorState.overlays.indexOf(overlay);
-      editorState.overlays.splice(idx + 1, 0, newOverlay);
-      editorState.selectedOverlayId = newOverlay.id;
-      renderOverlayMarkers();
-      scheduleProjectSave();
-    }
-
-    function deleteSelectedOverlay(): void {
-      if (!editorState || !editorState.selectedOverlayId) return;
-      const idx = editorState.overlays.findIndex(o => o.id === editorState!.selectedOverlayId);
-      if (idx < 0) return;
-      pushUndo();
-      const removed = editorState.overlays.splice(idx, 1)[0]!;
-      if (removed.saved) {
-        editorState.savedOverlays.push(removed);
-      } else if (removed.mediaType !== 'window') {
-        // Window media files are managed by take cleanup, not stageOverlayFile
-        const stillReferenced = editorState.overlays.some(o => o.mediaPath === removed.mediaPath)
-          || editorState.savedOverlays.some(o => o.mediaPath === removed.mediaPath);
-        if (!stillReferenced && activeProjectPath) {
-          window.electronAPI.stageOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-        }
-      }
-      editorState.selectedOverlayId = null;
-      renderOverlayMarkers();
-      renderOverlayList();
-      scheduleProjectSave();
-    }
-
-    function placeOverlayAtTime(movingId: string | null, targetStart: number, duration: number, maxTime: number, trackIndex = 0): number | null {
-      const others = editorState!.overlays.filter(o => o.id !== movingId && (o.trackIndex || 0) === trackIndex);
-      const targetEnd = targetStart + duration;
-
-      const collisions = others.filter(o => o.startTime < targetEnd && o.endTime > targetStart);
-      if (collisions.length === 0) {
-        const clamped = Math.max(0, Math.min(maxTime - duration, targetStart));
-        return clamped;
-      }
-
-      for (const collision of collisions) {
-        const overlapCenter = (Math.max(targetStart, collision.startTime) + Math.min(targetEnd, collision.endTime)) / 2;
-        const collisionCenter = (collision.startTime + collision.endTime) / 2;
-        const collisionDuration = collision.endTime - collision.startTime;
-
-        if (overlapCenter <= collisionCenter) {
-          const newStart = targetEnd;
-          if (newStart + collisionDuration <= maxTime) {
-            collision.startTime = newStart;
-            collision.endTime = newStart + collisionDuration;
-          } else {
-            const newStartL = targetStart - collisionDuration;
-            if (newStartL >= 0) {
-              collision.startTime = newStartL;
-              collision.endTime = targetStart;
-            } else {
-              return null;
-            }
-          }
-        } else {
-          const newEnd = targetStart;
-          const newStartL = newEnd - collisionDuration;
-          if (newStartL >= 0) {
-            collision.startTime = newStartL;
-            collision.endTime = newEnd;
-          } else {
-            const newStartR = targetEnd;
-            if (newStartR + collisionDuration <= maxTime) {
-              collision.startTime = newStartR;
-              collision.endTime = newStartR + collisionDuration;
-            } else {
-              return null;
-            }
-          }
-        }
-      }
-
-      others.sort((a, b) => a.startTime - b.startTime);
-      for (let i = 1; i < others.length; i++) {
-        if (others[i]!.startTime < others[i - 1]!.endTime) {
-          const dur = others[i]!.endTime - others[i]!.startTime;
-          others[i]!.startTime = others[i - 1]!.endTime;
-          others[i]!.endTime = others[i]!.startTime + dur;
-          if (others[i]!.endTime > maxTime) return null;
-        }
-      }
-
-      return Math.max(0, Math.min(maxTime - duration, targetStart));
-    }
-
-    // === Audio overlay timeline, trim, split, delete ===
-
-    const editorAudioTrack0 = document.getElementById('editorAudioTrack0');
-    let audioOverlayTrimDragState: OverlayTrimDragState | null = null;
-
-    function selectAudioOverlay(audioOverlayId: string): void {
-      if (!editorState) return;
-      editorState.selectedAudioOverlayId = audioOverlayId;
-      editorState.selectedOverlayId = null;
-      editorState.selectedSectionId = null;
-      renderAudioOverlayMarkers();
-      renderOverlayMarkers();
-      renderSectionMarkers();
-      if (activeSidebarTab === 'overlays') renderOverlayList();
-    }
-
-    function renderAudioOverlayMarkers(): void {
-      if (!editorAudioTrack0) return;
-      editorAudioTrack0.innerHTML = '';
-      if (!editorState || !editorState.duration || !Array.isArray(editorState.audioOverlays) || editorState.audioOverlays.length === 0) {
-        if (activeSidebarTab === 'overlays') renderOverlayList();
-        return;
-      }
-
-      for (const ao of editorState.audioOverlays) {
-        const pctLeft = (ao.startTime / editorState.duration) * 100;
-        const pctWidth = Math.max(0.35, ((ao.endTime - ao.startTime) / editorState.duration) * 100);
-        const selected = ao.id === editorState.selectedAudioOverlayId;
-
-        const band = document.createElement('div');
-        band.className = 'absolute top-0 bottom-0';
-        band.dataset.audioOverlayId = ao.id;
-        band.style.left = pctLeft + '%';
-        band.style.width = pctWidth + '%';
-        band.style.backgroundColor = selected ? 'rgba(20,184,166,0.45)' : 'rgba(20,184,166,0.22)';
-        band.style.borderRadius = '3px';
-        band.style.cursor = 'pointer';
-        if (selected) {
-          band.style.boxShadow = 'inset 0 0 0 2px rgba(94,234,212,0.6)';
-        }
-
-        const fileName = ao.mediaPath.split('/').pop() || '';
-        band.title = `\u266B ${fileName}: ${formatTime(ao.startTime)} - ${formatTime(ao.endTime)}`;
-
-        // Waveform canvas
-        const peaks = audioOverlayPeakCache.get(ao.mediaPath);
-        if (peaks) {
-          const waveCanvas = document.createElement('canvas');
-          waveCanvas.className = 'absolute inset-0 pointer-events-none';
-          waveCanvas.style.cssText = 'width:100%;height:100%;opacity:0.5;';
-          band.appendChild(waveCanvas);
-          // Defer drawing to next frame so dimensions are available
-          requestAnimationFrame(() => {
-            const rect = band.getBoundingClientRect();
-            waveCanvas.width = Math.max(1, Math.round(rect.width));
-            waveCanvas.height = Math.max(1, Math.round(rect.height));
-            drawWaveformOnCanvas(waveCanvas, peaks, ao.sourceStart, ao.sourceEnd, audioBufferCache.get(ao.mediaPath)?.duration || (ao.sourceEnd));
-          });
-        } else {
-          // Trigger async decode for waveform (will render on next markers refresh)
-          decodeAndCacheAudioBuffer(ao.mediaPath).then(() => { /* waveform available on next render */ });
-        }
-
-        const label = document.createElement('div');
-        label.className = 'absolute text-[9px] font-medium pointer-events-none truncate';
-        label.style.cssText = 'left:4px;right:4px;top:50%;transform:translateY(-50%);z-index:1;';
-        label.style.color = selected ? 'rgba(167,243,208,0.95)' : 'rgba(94,234,212,0.75)';
-        label.textContent = `\u266B ${fileName}`;
-        band.appendChild(label);
-
-        if (selected) {
-          const leftHandle = document.createElement('div');
-          leftHandle.dataset.audioOverlayTrimEdge = 'left';
-          leftHandle.dataset.audioOverlayId = ao.id;
-          leftHandle.style.cssText = 'position:absolute;top:0;bottom:0;left:0;width:6px;cursor:col-resize;z-index:30;border-left:3px solid rgba(94,234,212,0.7);';
-          band.appendChild(leftHandle);
-          const rightHandle = document.createElement('div');
-          rightHandle.dataset.audioOverlayTrimEdge = 'right';
-          rightHandle.dataset.audioOverlayId = ao.id;
-          rightHandle.style.cssText = 'position:absolute;top:0;bottom:0;right:0;width:6px;cursor:col-resize;z-index:30;border-right:3px solid rgba(94,234,212,0.7);';
-          band.appendChild(rightHandle);
-        }
-
-        editorAudioTrack0.appendChild(band);
-      }
-      if (activeSidebarTab === 'overlays') renderOverlayList();
-    }
-
-    function startAudioOverlayTrimDrag(e: MouseEvent, audioOverlayId: string, edge: string): void {
-      const ao = editorState!.audioOverlays.find(o => o.id === audioOverlayId);
-      if (!ao) return;
-      pushUndo();
-      audioOverlayTrimDragState = {
-        overlayId: audioOverlayId,
-        edge,
-        startX: e.clientX,
-        originalStartTime: ao.startTime,
-        originalEndTime: ao.endTime,
-        originalSourceStart: ao.sourceStart,
-        originalSourceEnd: ao.sourceEnd
-      };
-      const onMove = (e2: MouseEvent) => updateAudioOverlayTrimDrag(e2);
-      const onUp = () => {
-        audioOverlayTrimDragState = null;
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        renderAudioOverlayMarkers();
-        scheduleProjectSave();
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    }
-
-    function updateAudioOverlayTrimDrag(e: MouseEvent): void {
-      if (!audioOverlayTrimDragState || !editorState) return;
-      const ao = editorState.audioOverlays.find(o => o.id === audioOverlayTrimDragState!.overlayId);
-      if (!ao) return;
-      const rect = editorTimeline.getBoundingClientRect();
-      const pxPerSec = rect.width / editorState.duration;
-      const deltaSec = (e.clientX - audioOverlayTrimDragState.startX) / pxPerSec;
-      const sameTrack = editorState.audioOverlays.filter(o => (o.trackIndex || 0) === (ao.trackIndex || 0));
-      const idxInTrack = sameTrack.indexOf(ao);
-      const prevEnd = idxInTrack > 0 ? sameTrack[idxInTrack - 1]!.endTime : 0;
-      const nextStart = idxInTrack < sameTrack.length - 1 ? sameTrack[idxInTrack + 1]!.startTime : editorState.duration;
-
-      if (audioOverlayTrimDragState.edge === 'left') {
-        const newStart = Math.max(prevEnd, Math.min(ao.endTime - 0.1, audioOverlayTrimDragState.originalStartTime + deltaSec));
-        const shift = newStart - audioOverlayTrimDragState.originalStartTime;
-        ao.startTime = newStart;
-        ao.sourceStart = Math.max(0, audioOverlayTrimDragState.originalSourceStart + shift);
-      } else {
-        const newEnd = Math.min(nextStart, Math.max(ao.startTime + 0.1, audioOverlayTrimDragState.originalEndTime + deltaSec));
-        const shift = newEnd - audioOverlayTrimDragState.originalEndTime;
-        ao.endTime = newEnd;
-        ao.sourceEnd = Math.max(ao.sourceStart + 0.1, audioOverlayTrimDragState.originalSourceEnd + shift);
-      }
-      renderAudioOverlayMarkers();
-    }
-
-    function splitAudioOverlayAtPlayhead(): void {
-      if (!editorState || !editorState.selectedAudioOverlayId) return;
-      const ao = editorState.audioOverlays.find(o => o.id === editorState!.selectedAudioOverlayId);
-      if (!ao) return;
-      const time = editorState.currentTime;
-      if (time <= ao.startTime + 0.1 || time >= ao.endTime - 0.1) return;
-      pushUndo();
-
-      const splitSourceTime = ao.sourceStart + (time - ao.startTime);
-      const newAo: AudioOverlay = {
-        id: generateAudioOverlayId(),
-        trackIndex: ao.trackIndex || 0,
-        mediaPath: ao.mediaPath,
-        startTime: time,
-        endTime: ao.endTime,
-        sourceStart: splitSourceTime,
-        sourceEnd: ao.sourceEnd,
-        volume: ao.volume,
-        saved: false
-      };
-      ao.endTime = time;
-      ao.sourceEnd = splitSourceTime;
-      const idx = editorState.audioOverlays.indexOf(ao);
-      editorState.audioOverlays.splice(idx + 1, 0, newAo);
-      editorState.selectedAudioOverlayId = newAo.id;
-      renderAudioOverlayMarkers();
-      scheduleProjectSave();
-    }
-
-    function deleteSelectedAudioOverlay(): void {
-      if (!editorState || !editorState.selectedAudioOverlayId) return;
-      const idx = editorState.audioOverlays.findIndex(o => o.id === editorState!.selectedAudioOverlayId);
-      if (idx < 0) return;
-      pushUndo();
-      const removed = editorState.audioOverlays.splice(idx, 1)[0]!;
-      if (removed.saved) {
-        editorState.savedAudioOverlays.push(removed);
-      } else {
-        const stillReferenced = editorState.audioOverlays.some(o => o.mediaPath === removed.mediaPath)
-          || editorState.savedAudioOverlays.some(o => o.mediaPath === removed.mediaPath);
-        if (!stillReferenced && activeProjectPath) {
-          window.electronAPI.stageAudioOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-        }
-      }
-      editorState.selectedAudioOverlayId = null;
-      renderAudioOverlayMarkers();
-      renderOverlayList();
-      scheduleProjectSave();
-    }
-
-    function placeAudioOverlayAtTime(targetStart: number, duration: number, maxTime: number, trackIndex = 0, excludeId: string | null = null): number | null {
-      const others = editorState!.audioOverlays.filter(o => o.id !== excludeId && (o.trackIndex || 0) === trackIndex);
-      const targetEnd = targetStart + duration;
-      const collisions = others.filter(o => o.startTime < targetEnd && o.endTime > targetStart);
-      if (collisions.length === 0) {
-        return Math.max(0, Math.min(maxTime - duration, targetStart));
-      }
-      // Find first gap after targetStart
-      const sorted = others.sort((a, b) => a.startTime - b.startTime);
-      let candidate = targetStart;
-      for (const o of sorted) {
-        if (candidate + duration <= o.startTime) break;
-        candidate = o.endTime;
-      }
-      if (candidate + duration > maxTime) return null;
-      return candidate;
-    }
-
-    // Audio track click & trim handlers
-    if (editorAudioTrack0) {
-      editorAudioTrack0.addEventListener('mousedown', (e: MouseEvent) => {
-        if (!editorState) return;
-        const target = e.target as HTMLElement;
-        // Trim handle
-        const trimEdge = target.dataset.audioOverlayTrimEdge;
-        const trimId = target.dataset.audioOverlayId;
-        if (trimEdge && trimId) {
-          e.stopPropagation();
-          startAudioOverlayTrimDrag(e, trimId, trimEdge);
-          return;
-        }
-        // Segment click
-        const bandEl = target.closest('[data-audio-overlay-id]') as HTMLElement | null;
-        if (bandEl) {
-          const aoId = bandEl.dataset.audioOverlayId;
-          if (aoId) selectAudioOverlay(aoId);
-          return;
-        }
-      });
-
-      // Drop zone for audio files
-      editorAudioTrack0.addEventListener('dragover', (e: DragEvent) => {
-        e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-      });
-      editorAudioTrack0.addEventListener('drop', async (e: DragEvent) => {
-        e.preventDefault();
-        if (!editorState || !activeProjectPath || !e.dataTransfer?.files?.length) return;
-        const file = e.dataTransfer.files[0]!;
-        const filePath = window.electronAPI.getFilePathFromDrop(file);
-        if (!filePath) return;
-        const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
-        if (!AUDIO_OVERLAY_EXTENSIONS.includes(ext as typeof AUDIO_OVERLAY_EXTENSIONS[number])) return;
-
-        const result = await window.electronAPI.importAudioOverlayMedia(activeProjectPath, filePath);
-        if (!result || !result.mediaPath) return;
-
-        pushUndo();
-        const startTime = editorState.currentTime;
-        // Use file duration from import or fallback to remaining timeline
-        const audioDuration = result.duration > 0 ? result.duration : Math.max(5, editorState.duration - startTime);
-        const endTime = Math.min(startTime + audioDuration, editorState.duration);
-        const placedStart = placeAudioOverlayAtTime(startTime, endTime - startTime, editorState.duration, 0);
-        if (placedStart === null) return;
-
-        const newAo: AudioOverlay = {
-          id: generateAudioOverlayId(),
-          trackIndex: 0,
-          mediaPath: result.mediaPath,
-          startTime: placedStart,
-          endTime: placedStart + (endTime - startTime),
-          sourceStart: 0,
-          sourceEnd: endTime - startTime,
-          volume: 1.0,
-          saved: false
-        };
-        editorState.audioOverlays.push(newAo);
-        editorState.audioOverlays.sort((a, b) => a.startTime - b.startTime);
-        editorState.selectedAudioOverlayId = newAo.id;
-        renderAudioOverlayMarkers();
-        scheduleProjectSave();
-      });
-    }
-
-    function startTrimDrag(e: MouseEvent, sectionId: string, edge: string): void {
-      const section = editorState!.sections.find(s => s.id === sectionId);
-      if (!section) return;
-      pushUndo();
-      editorPause();
-      e.preventDefault();
-      const rect = editorTimeline.getBoundingClientRect();
-      const epsilon = 0.05;
-
-      // Snapshot all overlays that overlap with the section's trimmed edge.
-      // We capture broadly because shortening cuts ANY overlay in the way,
-      // while extending only affects edge-aligned overlays (decided in finishTrimDrag).
-      // Snapshot overlays that actually extend INTO the section (not just touching the boundary).
-      // For right edge: overlay must start before section.end and end after section.start (inside the section)
-      // For left edge: overlay must end after section.start and start before section.end (inside the section)
-      const overlaySnapshots: OverlayTrimSnapshot[] = [];
-      for (const o of editorState!.overlays) {
-        const insideSection = o.startTime < section.end - epsilon && o.endTime > section.start + epsilon;
-        if (insideSection) {
-          overlaySnapshots.push({
-            id: o.id,
-            originalStartTime: o.startTime,
-            originalEndTime: o.endTime,
-            originalSourceStart: o.sourceStart,
-            originalSourceEnd: o.sourceEnd
-          });
-        }
-      }
-
-      const audioOverlaySnapshots: OverlayTrimSnapshot[] = [];
-      for (const ao of editorState!.audioOverlays) {
-        const insideSection = ao.startTime < section.end - epsilon && ao.endTime > section.start + epsilon;
-        if (insideSection) {
-          audioOverlaySnapshots.push({
-            id: ao.id,
-            originalStartTime: ao.startTime,
-            originalEndTime: ao.endTime,
-            originalSourceStart: ao.sourceStart,
-            originalSourceEnd: ao.sourceEnd
-          });
-        }
-      }
-
-      trimDragState = {
-        sectionId,
-        edge,
-        originalSourceStart: section.sourceStart,
-        originalSourceEnd: section.sourceEnd,
-        originalStart: section.start,
-        originalEnd: section.end,
-        startMouseX: e.clientX,
-        pixelsPerSecond: rect.width / editorState!.duration,
-        overlaySnapshots,
-        audioOverlaySnapshots
-      };
-      document.body.style.cursor = 'col-resize';
-      const onMove = (e2: MouseEvent) => { e2.preventDefault(); updateTrimDrag(e2); };
-      const onUp = () => {
-        document.body.style.cursor = '';
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        finishTrimDrag();
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    }
-
-    function updateTrimDrag(e: MouseEvent): void {
-      if (!trimDragState || !editorState) return;
-      const section = editorState.sections.find(s => s.id === trimDragState!.sectionId);
-      if (!section) return;
-      const MIN_DURATION = 0.1;
-      const deltaPixels = e.clientX - trimDragState.startMouseX;
-      const deltaTime = deltaPixels / trimDragState.pixelsPerSecond;
-
-      if (trimDragState.edge === 'left') {
-        section.sourceStart = roundMs(Math.max(0, Math.min(
-          trimDragState.originalSourceEnd - MIN_DURATION,
-          trimDragState.originalSourceStart + deltaTime
-        )));
-        const newDuration = section.sourceEnd - section.sourceStart;
-        section.end = trimDragState.originalEnd;
-        section.start = roundMs(section.end - newDuration);
-        section.duration = roundMs(newDuration);
-      } else {
-        section.sourceEnd = roundMs(Math.max(
-          section.sourceStart + MIN_DURATION,
-          trimDragState.originalSourceEnd + deltaTime
-        ));
-        const newDuration = section.sourceEnd - section.sourceStart;
-        section.start = trimDragState.originalStart;
-        section.end = roundMs(section.start + newDuration);
-        section.duration = roundMs(newDuration);
-      }
-
-      renderSectionMarkers();
-    }
-
-    function finishTrimDrag(): void {
-      if (!trimDragState || !editorState) { trimDragState = null; return; }
-      const section = editorState.sections.find(s => s.id === trimDragState!.sectionId);
-      if (!section) { trimDragState = null; return; }
-      const sourceStartChanged = Math.abs(section.sourceStart - trimDragState.originalSourceStart) > 0.01;
-      const sourceEndChanged = Math.abs(section.sourceEnd - trimDragState.originalSourceEnd) > 0.01;
-
-      // Save trim state before clearing
-      const trimEdge = trimDragState.edge;
-      const origSectionStart = trimDragState.originalStart;
-      const origSectionEnd = trimDragState.originalEnd;
-      const origSourceStart = trimDragState.originalSourceStart;
-      const origSourceEnd = trimDragState.originalSourceEnd;
-      const overlaySnaps = trimDragState.overlaySnapshots;
-      const audioOverlaySnaps = trimDragState.audioOverlaySnapshots;
-      const snapshotIds = new Set(overlaySnaps.map(s => s.id));
-      const audioSnapshotIds = new Set(audioOverlaySnaps.map(s => s.id));
-
-      // Source delta: how much the section's source range changed at the trimmed edge
-      const sourceDelta = trimEdge === 'left'
-        ? section.sourceStart - origSourceStart   // positive = shortened, negative = extended
-        : section.sourceEnd - origSourceEnd;       // negative = shortened, positive = extended
-      const durationDelta = (section.sourceEnd - section.sourceStart) - (origSourceEnd - origSourceStart);
-
-      trimDragState = null;
-      if (!sourceStartChanged && !sourceEndChanged) { undoStack.pop(); updateUndoRedoButtons(); return; }
-      recalculateTimelinePositions();
-
-      // Apply overlay adjustments based on source-delta and alignment rules
-      const trimCtx: OverlayTrimContext = {
-        trimEdge: trimEdge as 'left' | 'right',
-        sourceDelta,
-        durationDelta,
-        sectionStart: section.start,
-        sectionEnd: section.end,
-        origSectionStart,
-        origSectionEnd
-      };
-
-      _applyOverlayTrimDelta(editorState.overlays as (Overlay | AudioOverlay)[], overlaySnaps, trimCtx);
-      _applyOverlayTrimDelta(editorState.audioOverlays as (Overlay | AudioOverlay)[], audioOverlaySnaps, trimCtx);
-
-      // Shift non-snapshotted overlays after the trim boundary to close/open gaps
-      if (Math.abs(durationDelta) > 0.001) {
-        const shiftBoundary = trimEdge === 'right' ? origSectionEnd : origSectionStart;
-        for (const o of editorState.overlays) {
-          if (snapshotIds.has(o.id)) continue;
-          if (o.startTime >= shiftBoundary - 0.01) {
-            o.startTime = roundMs(o.startTime + durationDelta);
-            o.endTime = roundMs(o.endTime + durationDelta);
-          }
-        }
-        for (const ao of editorState.audioOverlays) {
-          if (audioSnapshotIds.has(ao.id)) continue;
-          if (ao.startTime >= shiftBoundary - 0.01) {
-            ao.startTime = roundMs(ao.startTime + durationDelta);
-            ao.endTime = roundMs(ao.endTime + durationDelta);
-          }
-        }
-      }
-
-      syncSectionAnchorKeyframes();
-      renderSectionMarkers();
-      renderOverlayMarkers();
-      renderAudioOverlayMarkers();
-      refreshWaveform();
-      editorSeek(section.start);
-      scheduleProjectSave();
-    }
-
-    function getRenderKeyframes(): Keyframe[] {
-      if (!editorState) return [];
-
-      if (editorState.sections && editorState.sections.length > 0) {
-        syncSectionAnchorKeyframes();
-      }
-
-      const sorted = [...editorState.keyframes].sort((a, b) => a.time - b.time);
-      const minimal = sorted.map(kf => ({
-        time: kf.time,
-        pipX: kf.pipX,
-        pipY: kf.pipY,
-        pipVisible: kf.pipVisible,
-        cameraFullscreen: !!kf.cameraFullscreen,
-        backgroundZoom: clampSectionZoom(kf.backgroundZoom),
-        backgroundPanX: clampSectionPan(kf.backgroundPanX),
-        backgroundPanY: clampSectionPan(kf.backgroundPanY),
-        reelCropX: clampReelCropX(kf.reelCropX),
-        pipScale: normalizePipScale(kf.pipScale),
-        autoTrack: !!kf.autoTrack,
-        autoTrackSmoothing: kf.autoTrackSmoothing || 0.15,
-        sectionId: kf.sectionId,
-        autoSection: kf.autoSection,
-        pipSnapPoint: kf.pipSnapPoint,
-        savedLandscape: kf.savedLandscape,
-        savedReel: kf.savedReel
-      }));
-
-      if (minimal.length === 0 || minimal[0]!.time > 0.0001) {
-        minimal.unshift({
-          time: 0,
-          pipX: editorState.defaultPipX,
-          pipY: editorState.defaultPipY,
-          pipVisible: true,
-          cameraFullscreen: false,
-          backgroundZoom: DEFAULT_SECTION_ZOOM,
-          backgroundPanX: 0,
-          backgroundPanY: 0,
-          reelCropX: 0,
-          pipScale: editorState.pipScale || DEFAULT_PIP_SCALE,
-          autoTrack: false,
-          autoTrackSmoothing: 0.15,
-          sectionId: null,
-          autoSection: false,
-          pipSnapPoint: 'br' as PipSnapPoint,
-          savedLandscape: null,
-          savedReel: null
-        });
-      }
-
-      return minimal;
-    }
-
-    function getRenderSections(): unknown[] {
-      if (!editorState) return [];
-      if (editorState.sections && editorState.sections.length > 0) {
-        syncSectionAnchorKeyframes();
-      }
-      return editorState.sections.map((section) => {
-        const anchor = getSectionAnchorKeyframe(section.id, true);
-        return {
-          takeId: section.takeId,
-          sourceStart: section.sourceStart,
-          sourceEnd: section.sourceEnd,
-          backgroundZoom: clampSectionZoom(anchor?.backgroundZoom),
-          backgroundPanX: clampSectionPan(anchor?.backgroundPanX),
-          backgroundPanY: clampSectionPan(anchor?.backgroundPanY),
-          reelCropX: clampReelCropX(anchor?.reelCropX),
-          pipScale: normalizePipScale(anchor?.pipScale)
-        };
-      });
-    }
-
-    // ===== Shared drawPip function =====
-    function drawPip(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, pipX: number, pipY: number, pipW: number, pipH: number): void {
-      const r = 12;
-      targetCtx.save();
-      targetCtx.beginPath();
-      targetCtx.moveTo(pipX + r, pipY);
-      targetCtx.lineTo(pipX + pipW - r, pipY);
-      targetCtx.quadraticCurveTo(pipX + pipW, pipY, pipX + pipW, pipY + r);
-      targetCtx.lineTo(pipX + pipW, pipY + pipH - r);
-      targetCtx.quadraticCurveTo(pipX + pipW, pipY + pipH, pipX + pipW - r, pipY + pipH);
-      targetCtx.lineTo(pipX + r, pipY + pipH);
-      targetCtx.quadraticCurveTo(pipX, pipY + pipH, pipX, pipY + pipH - r);
-      targetCtx.lineTo(pipX, pipY + r);
-      targetCtx.quadraticCurveTo(pipX, pipY, pipX + r, pipY);
-      targetCtx.closePath();
-      targetCtx.clip();
-      const camW = video.videoWidth;
-      const camH = video.videoHeight;
-      const cropSize = Math.min(camW, camH);
-      const sx = (camW - cropSize) / 2;
-      const sy = (camH - cropSize) / 2;
-      targetCtx.drawImage(video, sx, sy, cropSize, cropSize, pipX, pipY, pipW, pipH);
-      targetCtx.restore();
-    }
-
-    function drawCameraRect(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, w: number, h: number, r: number): void {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh) return;
-      targetCtx.save();
-      targetCtx.beginPath();
-      if (r > 0.5) {
-        targetCtx.moveTo(x + r, y);
-        targetCtx.lineTo(x + w - r, y);
-        targetCtx.quadraticCurveTo(x + w, y, x + w, y + r);
-        targetCtx.lineTo(x + w, y + h - r);
-        targetCtx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-        targetCtx.lineTo(x + r, y + h);
-        targetCtx.quadraticCurveTo(x, y + h, x, y + h - r);
-        targetCtx.lineTo(x, y + r);
-        targetCtx.quadraticCurveTo(x, y, x + r, y);
-      } else {
-        targetCtx.rect(x, y, w, h);
-      }
-      targetCtx.closePath();
-      targetCtx.clip();
-      const scale = Math.max(w / vw, h / vh);
-      const dw = vw * scale;
-      const dh = vh * scale;
-      const dx = x + (w - dw) / 2;
-      const dy = y + (h - dh) / 2;
-      targetCtx.drawImage(video, dx, dy, dw, dh);
-      targetCtx.restore();
-    }
-
-    // ── Source picker state ───────────────────────────────────────────
-    type PickerMode = 'none' | 'entire-screen' | 'windows' | 'device';
-    let pickerMode: PickerMode = 'none';
-    let pickerEntireScreenId = '';
-    let pickerDeviceId = '';
-    let pickerCheckedWindows: Array<{ id: string; name: string }> = [];
-    let pickerAllSources: Array<{ id: string; name: string }> = [];
-    let pickerAllVideoInputs: MediaDeviceInfo[] = [];
-
-    function updatePickerButtonText(): void {
-      if (pickerMode === 'none') {
-        screenPickerBtn.textContent = 'None';
-      } else if (pickerMode === 'entire-screen') {
-        screenPickerBtn.textContent = 'Entire Screen';
-      } else if (pickerMode === 'device') {
-        const dev = pickerAllVideoInputs.find(d => d.deviceId === pickerDeviceId);
-        screenPickerBtn.textContent = dev?.label || 'Camera';
-      } else if (pickerCheckedWindows.length === 1) {
-        screenPickerBtn.textContent = pickerCheckedWindows[0]!.name;
-      } else if (pickerCheckedWindows.length === 2) {
-        screenPickerBtn.textContent = '2 Windows';
-      } else {
-        screenPickerBtn.textContent = 'None';
-      }
-    }
-
-    function renderPickerPanel(): void {
-      // Single-select zone: None + Entire Screen
-      screenPickerSingleZone.innerHTML = '';
-      const noneRow = createPickerRadioRow('None', pickerMode === 'none', () => {
-        pickerMode = 'none';
-        pickerCheckedWindows = [];
-        pickerDeviceId = '';
-        applyPickerSelection();
-      });
-      screenPickerSingleZone.appendChild(noneRow);
-
-      const screenSource = pickerAllSources.find(s => s.id.startsWith('screen:'));
-      if (screenSource) {
-        pickerEntireScreenId = screenSource.id;
-        const entireRow = createPickerRadioRow('Entire Screen', pickerMode === 'entire-screen', () => {
-          pickerMode = 'entire-screen';
-          pickerCheckedWindows = [];
-          pickerDeviceId = '';
-          applyPickerSelection();
-        });
-        screenPickerSingleZone.appendChild(entireRow);
-      }
-
-      // Window checkboxes zone
-      screenPickerWindowZone.innerHTML = '';
-      const windowSources = pickerAllSources.filter(s => s.id.startsWith('window:'));
-      if (windowSources.length === 0) {
-        screenPickerWindowZone.classList.add('hidden');
-      } else {
-        screenPickerWindowZone.classList.remove('hidden');
-        for (const ws of windowSources) {
-          const checked = pickerCheckedWindows.some(w => w.id === ws.id);
-          const disabled = !checked && pickerCheckedWindows.length >= 2;
-          const row = createPickerCheckboxRow(ws.name, checked, disabled, (isChecked) => {
-            if (isChecked) {
-              if (pickerCheckedWindows.length < 2) {
-                pickerCheckedWindows.push({ id: ws.id, name: ws.name });
-                pickerMode = 'windows';
-                pickerDeviceId = '';
-              }
-            } else {
-              pickerCheckedWindows = pickerCheckedWindows.filter(w => w.id !== ws.id);
-              if (pickerCheckedWindows.length === 0) pickerMode = 'none';
-            }
-            applyPickerSelection();
-          });
-          screenPickerWindowZone.appendChild(row);
-        }
-      }
-
-      // Capture devices zone
-      screenPickerDeviceZone.innerHTML = '';
-      if (pickerAllVideoInputs.length === 0) {
-        screenPickerDeviceZone.classList.add('hidden');
-      } else {
-        screenPickerDeviceZone.classList.remove('hidden');
-        const label = document.createElement('div');
-        label.className = 'px-3 py-1 text-xs text-neutral-500 uppercase tracking-wider';
-        label.textContent = 'Capture Devices';
-        screenPickerDeviceZone.appendChild(label);
-        for (const dev of pickerAllVideoInputs) {
-          const active = pickerMode === 'device' && pickerDeviceId === dev.deviceId;
-          const row = createPickerRadioRow(dev.label || 'Camera', active, () => {
-            pickerMode = 'device';
-            pickerDeviceId = dev.deviceId;
-            pickerCheckedWindows = [];
-            applyPickerSelection();
-          });
-          screenPickerDeviceZone.appendChild(row);
-        }
-      }
-    }
-
-    function createPickerRadioRow(label: string, active: boolean, onClick: () => void): HTMLElement {
-      const div = document.createElement('div');
-      div.className = `flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-neutral-800 ${active ? 'text-white' : 'text-neutral-400'}`;
-      div.innerHTML = `<span class="w-3 h-3 rounded-full border ${active ? 'border-blue-500 bg-blue-500' : 'border-neutral-600'} flex-shrink-0"></span><span class="truncate">${label}</span>`;
-      div.addEventListener('click', onClick);
-      return div;
-    }
-
-    function createPickerCheckboxRow(label: string, checked: boolean, disabled: boolean, onChange: (checked: boolean) => void): HTMLElement {
-      const div = document.createElement('div');
-      div.className = `flex items-center gap-2 px-3 py-1.5 ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-neutral-800'} ${checked ? 'text-white' : 'text-neutral-400'}`;
-      div.innerHTML = `<span class="w-3 h-3 rounded-sm border ${checked ? 'border-blue-500 bg-blue-500' : 'border-neutral-600'} flex-shrink-0 flex items-center justify-center text-xs">${checked ? '✓' : ''}</span><span class="truncate">${label}</span>`;
-      if (!disabled) {
-        div.addEventListener('click', () => onChange(!checked));
-      }
-      return div;
-    }
-
-    async function applyPickerSelection(): Promise<void> {
+  });
+
+  // Drop zone for audio files
+  editorAudioTrack0.addEventListener('dragover', (e: DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  editorAudioTrack0.addEventListener('drop', async (e: DragEvent) => {
+    e.preventDefault();
+    if (!editorState || !activeProjectPath || !e.dataTransfer?.files?.length) return;
+    const file = e.dataTransfer.files[0]!;
+    const filePath = window.electronAPI.getFilePathFromDrop(file);
+    if (!filePath) return;
+    const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
+    if (!AUDIO_OVERLAY_EXTENSIONS.includes(ext as (typeof AUDIO_OVERLAY_EXTENSIONS)[number]))
+      return;
+
+    const result = await window.electronAPI.importAudioOverlayMedia(activeProjectPath, filePath);
+    if (!result || !result.mediaPath) return;
+
+    pushUndo();
+    const startTime = editorState.currentTime;
+    // Use file duration from import or fallback to remaining timeline
+    const audioDuration =
+      result.duration > 0 ? result.duration : Math.max(5, editorState.duration - startTime);
+    const endTime = Math.min(startTime + audioDuration, editorState.duration);
+    const placedStart = placeAudioOverlayAtTime(
+      startTime,
+      endTime - startTime,
+      editorState.duration,
+      0
+    );
+    if (placedStart === null) return;
+
+    const newAo: AudioOverlay = {
+      id: generateAudioOverlayId(),
+      trackIndex: 0,
+      mediaPath: result.mediaPath,
+      startTime: placedStart,
+      endTime: placedStart + (endTime - startTime),
+      sourceStart: 0,
+      sourceEnd: endTime - startTime,
+      volume: 1.0,
+      saved: false
+    };
+    editorState.audioOverlays.push(newAo);
+    editorState.audioOverlays.sort((a, b) => a.startTime - b.startTime);
+    editorState.selectedAudioOverlayId = newAo.id;
+    renderAudioOverlayMarkers();
+    scheduleProjectSave();
+  });
+}
+
+// ── Source picker state ───────────────────────────────────────────
+
+// Toggle picker panel
+screenPickerBtn.addEventListener('click', () => {
+  if (recording) return;
+  const isOpen = !screenPickerPanel.classList.contains('hidden');
+  if (isOpen) {
+    screenPickerPanel.classList.add('hidden');
+  } else {
+    populatePickerSources().then(() => {
       renderPickerPanel();
-      updatePickerButtonText();
+      screenPickerPanel.classList.remove('hidden');
+    });
+  }
+});
 
-      // Handle streams
-      if (pickerMode === 'windows' && pickerCheckedWindows.length > 0) {
-        // Stop screen stream, start window streams
-        if (screenStream) {
-          screenStream.getTracks().forEach(t => t.stop());
-          screenStream = null;
-          screenVideo.srcObject = null;
-        }
-        await updateWindowStreams(pickerCheckedWindows);
-        // Auto-prompt for wallpaper if none set
-        if (!backgroundImage) {
-          pickAndLoadBackground();
-        }
-      } else {
-        // Stop window streams, use screen/device stream
-        cleanupWindowStreams();
-        try { await updateScreenStream(); } catch (err) { console.warn('Screen stream update failed:', err); }
-      }
-      updatePreview();
+// Close picker on outside click
+document.addEventListener('click', (e) => {
+  if (
+    !screenPickerPanel.classList.contains('hidden') &&
+    !screenPickerPanel.contains(e.target as Node) &&
+    e.target !== screenPickerBtn
+  ) {
+    screenPickerPanel.classList.add('hidden');
+  }
+});
+
+// Refresh on device change
+if (navigator.mediaDevices && typeof navigator.mediaDevices.ondevicechange !== 'undefined') {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    if (!screenPickerPanel.classList.contains('hidden')) {
+      populatePickerSources().then(() => renderPickerPanel());
     }
+  });
+}
 
-    // Toggle picker panel
-    screenPickerBtn.addEventListener('click', () => {
-      if (recording) return;
-      const isOpen = !screenPickerPanel.classList.contains('hidden');
-      if (isOpen) {
-        screenPickerPanel.classList.add('hidden');
-      } else {
-        populatePickerSources().then(() => {
-          renderPickerPanel();
-          screenPickerPanel.classList.remove('hidden');
-        });
-      }
+function _showProcessingState(title: string, status: string, progress: number | null = null): void {
+  processingTitle.textContent = title || 'Processing...';
+  processingStatus.textContent = status || '';
+  setProcessingProgress(progress);
+  setWorkspaceView('processing');
+}
+
+function _buildSectionAnchorSnapshot(keyframes: Keyframe[]): Map<string, Partial<Keyframe>> {
+  const anchors = new Map<string, Partial<Keyframe>>();
+  for (const keyframe of Array.isArray(keyframes) ? keyframes : []) {
+    if (!keyframe.sectionId) continue;
+    anchors.set(keyframe.sectionId, {
+      pipX: keyframe.pipX,
+      pipY: keyframe.pipY,
+      pipVisible: keyframe.pipVisible !== false,
+      cameraFullscreen: !!keyframe.cameraFullscreen,
+      backgroundZoom: clampSectionZoom(keyframe.backgroundZoom),
+      backgroundPanX: clampSectionPan(keyframe.backgroundPanX),
+      backgroundPanY: clampSectionPan(keyframe.backgroundPanY)
+    });
+  }
+  return anchors;
+}
+
+export function appendTakeToTimeline({
+  takeId,
+  screenPath: _screenPath,
+  cameraPath,
+  windowPaths: _appendWindowPaths,
+  recordedDuration,
+  trimSections,
+  projectSession
+}: AppendTakeOpts): AppendTakeResult | null {
+  const takeSections = normalizeTakeSections(trimSections, recordedDuration);
+  for (const section of takeSections) {
+    section.takeId = takeId;
+  }
+  const takeDuration =
+    takeSections.length > 0
+      ? takeSections[takeSections.length - 1]!.end
+      : Math.max(0, Number(recordedDuration) || 0);
+
+  if (!matchesActiveProjectSession(projectSession)) return null;
+
+  const hasCamera = !!cameraPath;
+
+  // Create window overlays from recorded window paths
+  const windowOverlays: Overlay[] =
+    Array.isArray(_appendWindowPaths) && _appendWindowPaths.length > 0
+      ? createOverlaysFromWindowPaths(_appendWindowPaths, takeDuration)
+      : [];
+
+  if (!editorState) {
+    enterEditor(takeSections, {
+      hasCamera,
+      overlays: windowOverlays.length > 0 ? windowOverlays : undefined,
+      // Window overlay mode uses canvas dimensions as source resolution
+      sourceWidth: windowOverlays.length > 0 ? CANVAS_W : undefined,
+      sourceHeight: windowOverlays.length > 0 ? CANVAS_H : undefined,
+      initialView: 'timeline'
     });
 
-    // Close picker on outside click
-    document.addEventListener('click', (e) => {
-      if (!screenPickerPanel.classList.contains('hidden') &&
-          !screenPickerPanel.contains(e.target as Node) &&
-          e.target !== screenPickerBtn) {
-        screenPickerPanel.classList.add('hidden');
-      }
-    });
-
-    async function populatePickerSources(): Promise<void> {
-      try {
-        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-        tempStream.getTracks().forEach(t => t.stop());
-      } catch (_e) { /* ignore */ }
-
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      pickerAllSources = await window.electronAPI.getSources();
-      pickerAllVideoInputs = devices.filter(d => d.kind === 'videoinput');
-
-      // Remove closed windows from checked list
-      pickerCheckedWindows = pickerCheckedWindows.filter(w =>
-        pickerAllSources.some(s => s.id === w.id)
-      );
-      if (pickerMode === 'windows' && pickerCheckedWindows.length === 0) {
-        pickerMode = 'none';
-      }
-    }
-
-    // Populate device lists (now also populates picker)
-    async function enumerateDevices(): Promise<void> {
-      await populatePickerSources();
-
-      // Still populate camera and audio selects the old way
-      cameraSelect.innerHTML = '<option value="">None</option>';
-      audioSelect.innerHTML = '<option value="">None</option>';
-
-      pickerAllVideoInputs.forEach((d, i) => {
-        const opt = document.createElement('option');
-        opt.value = d.deviceId;
-        opt.textContent = d.label || `Camera ${i + 1}`;
-        cameraSelect.appendChild(opt);
-      });
-
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      devices.filter(d => d.kind === 'audioinput').forEach((d, i) => {
-        const opt = document.createElement('option');
-        opt.value = d.deviceId;
-        opt.textContent = d.label || `Microphone ${i + 1}`;
-        audioSelect.appendChild(opt);
-      });
-
-      // Default selection: Entire Screen
-      const screenSource = pickerAllSources.find(s => s.id.startsWith('screen:'));
-      if (screenSource && pickerMode === 'none' && pickerCheckedWindows.length === 0) {
-        pickerMode = 'entire-screen';
-        pickerEntireScreenId = screenSource.id;
-      }
-      if (cameraSelect.options.length > 1) cameraSelect.selectedIndex = 1;
-      if (audioSelect.options.length > 1) audioSelect.selectedIndex = 1;
-
-      updatePickerButtonText();
-      // Acquire stream for default selection
-      try { await updateScreenStream(); } catch (_e) { console.warn('Default screen stream failed:', _e); }
-      updatePreview();
-    }
-
-    // Refresh on device change
-    if (navigator.mediaDevices && typeof navigator.mediaDevices.ondevicechange !== 'undefined') {
-      navigator.mediaDevices.addEventListener('devicechange', () => {
-        if (!screenPickerPanel.classList.contains('hidden')) {
-          populatePickerSources().then(() => renderPickerPanel());
-        }
-      });
-    }
-
-    async function updateScreenStream(): Promise<void> {
-      if (screenStream) {
-        screenStream.getTracks().forEach(t => t.stop());
-        screenStream = null;
-        screenVideo.srcObject = null;
-      }
-
-      // Derive sourceId from picker state (screenSelect is a dead hidden element)
-      let sourceId = '';
-      if (pickerMode === 'entire-screen') sourceId = pickerEntireScreenId;
-      else if (pickerMode === 'device') sourceId = 'device:' + pickerDeviceId;
-      if (!sourceId) return;
-
-      if (sourceId.startsWith('device:')) {
-        const deviceId = sourceId.slice('device:'.length);
-        screenStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-        });
-      } else {
-        // Electron desktop capture uses non-standard 'mandatory' constraints
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Chromium desktop capture mandatory constraints
-        const desktopConstraints: any = {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: sourceId,
-            maxFrameRate: 30
-          }
-        };
-        screenStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: desktopConstraints
-        });
-      }
-      screenVideo.srcObject = screenStream;
-    }
-
-    async function updateCameraStream(): Promise<void> {
-      if (cameraStream) {
-        cameraStream.getTracks().forEach(t => t.stop());
-        cameraStream = null;
-        cameraVideo.srcObject = null;
-      }
-
-      const deviceId = cameraSelect.value;
-      if (!deviceId) return;
-
-      cameraStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          deviceId: { exact: deviceId },
-          width: { ideal: 1920, max: 1920 },
-          height: { ideal: 1080, max: 1080 },
-          frameRate: { ideal: 30, max: 30 },
-          aspectRatio: { ideal: 16 / 9 }
-        },
-        audio: false
-      });
-      const [cameraTrack] = cameraStream.getVideoTracks();
-      if (cameraTrack && 'contentHint' in cameraTrack) {
-        cameraTrack.contentHint = 'detail';
-        console.log(`Camera track settings: ${JSON.stringify(cameraTrack.getSettings?.() || {})}`);
-      }
-      cameraVideo.srcObject = cameraStream;
-    }
-
-    async function updateAudioStream(): Promise<void> {
-      stopAudioMeter();
-      if (audioStream) {
-        audioStream.getTracks().forEach(t => t.stop());
-        audioStream = null;
-      }
-
-      const deviceId = audioSelect.value;
-      if (!deviceId) return;
-
-      audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: { deviceId: { exact: deviceId } },
-        video: false
-      });
-      startAudioMeter(audioStream);
-    }
-
-    async function updateWindowStreams(sourceIds: Array<{ id: string; name: string }>): Promise<void> {
-      cleanupWindowStreams();
-      windowSourceNames = [];
-      for (const source of sourceIds) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Chromium desktop capture mandatory constraints
-          const desktopConstraints: any = {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: source.id,
-              maxFrameRate: 30
-            }
-          };
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: desktopConstraints
-          });
-          const video = document.createElement('video');
-          video.autoplay = true;
-          video.muted = true;
-          video.playsInline = true;
-          video.srcObject = stream;
-          windowStreams.push(stream);
-          windowVideos.push(video);
-          windowSourceNames.push(source.name);
-
-          // Handle window closed during recording
-          const track = stream.getVideoTracks()[0];
-          if (track) {
-            const idx = windowStreams.length - 1;
-            track.addEventListener('ended', () => {
-              console.warn(`Window capture track ended: ${source.name}`);
-              if (windowStreams[idx]) {
-                windowStreams[idx]!.getTracks().forEach(t => t.stop());
-              }
-            });
-          }
-        } catch (err) {
-          console.warn(`Failed to capture window "${source.name}":`, err);
-        }
-      }
-    }
-
-    function cleanupWindowStreams(): void {
-      for (const stream of windowStreams) {
-        stream.getTracks().forEach(t => t.stop());
-      }
-      for (const video of windowVideos) {
-        video.srcObject = null;
-      }
-      windowStreams = [];
-      windowVideos = [];
-      windowSourceNames = [];
-    }
-
-    async function pickAndLoadBackground(): Promise<void> {
-      const filePath = await window.electronAPI.pickBackgroundImage();
-      if (!filePath) return;
-      await loadBackgroundFromPath(filePath);
-      scheduleProjectSave();
-    }
-
-    async function loadBackgroundFromPath(filePath: string): Promise<void> {
-      try {
-        const fileUrl = window.electronAPI.pathToFileUrl(filePath);
-        const img = new Image();
-        await new Promise<void>((resolve, reject) => {
-          img.onload = () => resolve();
-          img.onerror = () => reject(new Error('Failed to load background image'));
-          img.src = fileUrl;
-        });
-        backgroundImage = img;
-        backgroundImagePath = filePath;
-      } catch (_err) {
-        backgroundImage = null;
-        backgroundImagePath = null;
-      }
-    }
-
-    function drawBackground(targetCtx: CanvasRenderingContext2D, w: number, h: number): void {
-      if (backgroundImage) {
-        // Cover: fill entire canvas without stretching, crop overflow
-        const scale = Math.max(w / backgroundImage.naturalWidth, h / backgroundImage.naturalHeight);
-        const dw = backgroundImage.naturalWidth * scale;
-        const dh = backgroundImage.naturalHeight * scale;
-        const dx = (w - dw) / 2;
-        const dy = (h - dh) / 2;
-        targetCtx.drawImage(backgroundImage, dx, dy, dw, dh);
-      } else {
-        targetCtx.fillStyle = '#1E1E1E';
-        targetCtx.fillRect(0, 0, w, h);
-      }
-    }
-
-    function updatePreview(): void {
-      const hasAny = screenStream || cameraStream || windowStreams.length > 0;
-      noPreview.classList.toggle('hidden', !!hasAny);
-      recordBtn.disabled = !hasAny || !saveFolder;
-
-      if (drawRAF) cancelAnimationFrame(drawRAF);
-      if (hasAny) drawComposite();
-    }
-
-    function drawComposite(): void {
-      // Window capture mode: wallpaper + windows + camera PIP
-      if (windowStreams.length > 0) {
-        drawBackground(ctx, CANVAS_W, CANVAS_H);
-
-        if (windowStreams.length === 1 && windowVideos[0]) {
-          const vid = windowVideos[0]!;
-          if (vid.videoWidth && vid.videoHeight) {
-            drawFitRounded(ctx, vid, 0, 0, CANVAS_W, CANVAS_H);
-          }
-        } else if (windowStreams.length >= 2) {
-          const halfW = (CANVAS_W - 16) / 2;
-          for (let i = 0; i < 2; i++) {
-            const vid = windowVideos[i];
-            if (vid && vid.videoWidth && vid.videoHeight) {
-              const x = i === 0 ? 0 : halfW + 16;
-              drawFitRounded(ctx, vid, x, 0, halfW, CANVAS_H);
-            }
-          }
-        }
-
-        // Camera PIP on top
-        const hasCamera = cameraStream && cameraVideo.videoWidth;
-        if (hasCamera) {
-          const pipW = PIP_SIZE;
-          const pipH = pipW;
-          const pipX = CANVAS_W - pipW - PIP_MARGIN;
-          const pipY = CANVAS_H - pipH - PIP_MARGIN;
-          drawPip(ctx, cameraVideo, pipX, pipY, pipW, pipH);
-        }
-
-        drawRAF = requestAnimationFrame(drawComposite);
-        return;
-      }
-
-      // Original single-source mode
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-      const hasScreen = screenStream && screenVideo.videoWidth;
-      const hasCamera = cameraStream && cameraVideo.videoWidth;
-
-      const drawScreen = screenFitSelect.value === 'fill' ? drawFill : drawFit;
-
-      if (hasScreen && hasCamera) {
-        drawScreen(ctx, screenVideo, 0, 0, CANVAS_W, CANVAS_H);
-        const pipW = PIP_SIZE;
-        const pipH = pipW;
-        const pipX = CANVAS_W - pipW - PIP_MARGIN;
-        const pipY = CANVAS_H - pipH - PIP_MARGIN;
-        drawPip(ctx, cameraVideo, pipX, pipY, pipW, pipH);
-      } else if (hasScreen) {
-        drawScreen(ctx, screenVideo, 0, 0, CANVAS_W, CANVAS_H);
-      } else if (hasCamera) {
-        drawFit(ctx, cameraVideo, 0, 0, CANVAS_W, CANVAS_H);
-      }
-
-      drawRAF = requestAnimationFrame(drawComposite);
-    }
-
-    function drawFit(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh) return;
-      const scale = Math.min(w / vw, h / vh);
-      const dw = vw * scale;
-      const dh = vh * scale;
-      const dx = x + (w - dw) / 2;
-      const dy = y + (h - dh) / 2;
-      targetCtx.drawImage(video, dx, dy, dw, dh);
-    }
-
-    function drawFitRounded(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh) return;
-      const scale = Math.min(w / vw, h / vh);
-      const dw = vw * scale;
-      const dh = vh * scale;
-      const dx = x + (w - dw) / 2;
-      const dy = y + (h - dh) / 2;
-      const radius = Math.max(0, Math.round(18 * scale));
-      if (dw <= 0 || dh <= 0) return;
-      targetCtx.save();
-      targetCtx.beginPath();
-      targetCtx.roundRect(dx, dy, dw, dh, radius);
-      targetCtx.clip();
-      targetCtx.drawImage(video, dx, dy, dw, dh);
-      targetCtx.restore();
-    }
-
-    function drawFill(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh) return;
-      const scale = Math.max(w / vw, h / vh);
-      const dw = vw * scale;
-      const dh = vh * scale;
-      const dx = x + (w - dw) / 2;
-      const dy = y + (h - dh) / 2;
-      targetCtx.save();
-      targetCtx.beginPath();
-      targetCtx.rect(x, y, w, h);
-      targetCtx.clip();
-      targetCtx.drawImage(video, dx, dy, dw, dh);
-      targetCtx.restore();
-    }
-
-    function drawEditorScreenWithZoom(targetCtx: CanvasRenderingContext2D, video: HTMLVideoElement, fitMode: string, backgroundZoom: unknown, backgroundPanX = 0, backgroundPanY = 0, backgroundFocusX: number | null = null, backgroundFocusY: number | null = null): void {
-      if (!editorZoomBufferCtx) return;
-      const zoom = clampSectionZoom(backgroundZoom);
-      const drawBase = fitMode === 'fill' ? drawFill : drawFit;
-
-      if (zoom <= 1.0001 && zoom >= 0.9999) {
-        drawBase(targetCtx, video, 0, 0, CANVAS_W, CANVAS_H);
-        return;
-      }
-
-      if (zoom < 0.9999) {
-        editorZoomBufferCtx.fillStyle = '#000';
-        editorZoomBufferCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-        drawBase(editorZoomBufferCtx, video, 0, 0, CANVAS_W, CANVAS_H);
-
-        targetCtx.fillStyle = '#000';
-        targetCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        targetCtx.save();
-        targetCtx.globalAlpha = 0.2;
-        targetCtx.drawImage(editorZoomBuffer, 0, 0, CANVAS_W, CANVAS_H);
-        targetCtx.restore();
-
-        const scaledW = Math.round(CANVAS_W * zoom);
-        const scaledH = Math.round(CANVAS_H * zoom);
-        const offsetX = Math.round((CANVAS_W - scaledW) / 2);
-        const offsetY = Math.round((CANVAS_H - scaledH) / 2);
-        targetCtx.drawImage(editorZoomBuffer, 0, 0, CANVAS_W, CANVAS_H, offsetX, offsetY, scaledW, scaledH);
-        return;
-      }
-
-      editorZoomBufferCtx.fillStyle = '#000';
-      editorZoomBufferCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      drawBase(editorZoomBufferCtx, video, 0, 0, CANVAS_W, CANVAS_H);
-
-      const { sourceW, sourceH } = resolveZoomCrop(zoom, backgroundPanX, backgroundPanY);
-      const focusX = backgroundFocusX ?? panToFocusCoord(zoom, backgroundPanX, 0.5);
-      const focusY = backgroundFocusY ?? panToFocusCoord(zoom, backgroundPanY, 0.5);
-      const sourceX = Math.max(0, Math.min(CANVAS_W - sourceW, focusX * CANVAS_W - sourceW / 2));
-      const sourceY = Math.max(0, Math.min(CANVAS_H - sourceH, focusY * CANVAS_H - sourceH / 2));
-      targetCtx.drawImage(editorZoomBuffer, sourceX, sourceY, sourceW, sourceH, 0, 0, CANVAS_W, CANVAS_H);
-    }
-
-    // Audio level meter
-    function startAudioMeter(stream: MediaStream): void {
-      audioContext = new AudioContext();
-      analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      micSourceNode = audioContext.createMediaStreamSource(stream);
-      micSourceNode.connect(analyser);
-
-      const data = new Uint8Array(analyser.frequencyBinCount);
-
-      function updateMeter(): void {
-        analyser!.getByteFrequencyData(data);
-        const avg = data.reduce((a, b) => a + b, 0) / data.length;
-        const pct = Math.min(100, (avg / 128) * 100);
-        audioMeter.style.width = pct + '%';
-        audioMeter.className = `h-full rounded-full transition-all duration-75 ${pct > 70 ? 'bg-red-500' : pct > 40 ? 'bg-amber-500' : 'bg-emerald-500'}`;
-        meterRAF = requestAnimationFrame(updateMeter);
-      }
-      updateMeter();
-    }
-
-    function stopAudioMeter(): void {
-      if (meterRAF) cancelAnimationFrame(meterRAF);
-      meterRAF = null;
-      micSourceNode = null;
-      if (audioContext) {
-        if (workletRegistered === audioContext) workletRegistered = null;
-        audioContext.close();
-        audioContext = null;
-      }
-      audioMeter.style.width = '0%';
-    }
-
-    // Recording
-    function toggleRecording(): void {
-      if (!recording) startRecording();
-      else stopRecording();
-    }
-
-    let supportedRecorderMimeType: string | undefined;
-
-    function getSupportedRecorderMimeType(): string {
-      if (supportedRecorderMimeType !== undefined) return supportedRecorderMimeType;
-
-      const candidates = [
-        'video/webm; codecs=vp8',
-        'video/webm; codecs=vp9',
-        'video/webm'
-      ];
-
-      supportedRecorderMimeType = candidates.find((mimeType) => {
-        return typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mimeType);
-      }) || '';
-
-      return supportedRecorderMimeType;
-    }
-
-    function getRecorderOptions(suffix: string): MediaRecorderOptions {
-      const mimeType = getSupportedRecorderMimeType();
-      const options: MediaRecorderOptions = mimeType ? { mimeType } : {};
-
-      if (suffix === 'camera') {
-        options.videoBitsPerSecond = 10000000;
-        options.audioBitsPerSecond = 192000;
-      } else if (suffix.startsWith('win')) {
-        // Window captures: maximum bitrate for pixel-perfect text/UI
-        options.videoBitsPerSecond = 60000000;
-        options.audioBitsPerSecond = 192000;
-      } else {
-        // Screen recording
-        options.videoBitsPerSecond = 30000000;
-        options.audioBitsPerSecond = 192000;
-      }
-
-      return options;
-    }
-
-    function createRecorder(stream: MediaStream, suffix: string): AppMediaRecorder {
-      const chunks: Blob[] = [];
-      const recorder = new MediaRecorder(stream, getRecorderOptions(suffix)) as AppMediaRecorder;
-
-      recorder.ondataavailable = (e: BlobEvent) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
-
-      recorder.blobPromise = new Promise((resolve) => {
-        recorder.onstop = async () => {
-          const blob = new Blob(chunks, { type: 'video/webm' });
-          const buffer = await blob.arrayBuffer();
-          const savedPath = await window.electronAPI.saveVideo(buffer, saveFolder, suffix);
-          if (savedPath) console.log('Saved:', savedPath);
-          resolve({ blob, path: savedPath });
-        };
-      });
-
-      recorder.suffix = suffix;
-      return recorder;
-    }
-
-    function addAudioToStream(stream: MediaStream): MediaStream {
-      if (!audioStream) return stream;
-      const combined = new MediaStream([
-        ...stream.getVideoTracks(),
-        ...audioStream.getAudioTracks()
-      ]);
-      return combined;
-    }
-
-    function mergeInt16Arrays(arrays: Int16Array[]): Int16Array {
-      let totalLength = 0;
-      for (const arr of arrays) totalLength += arr.length;
-      const merged = new Int16Array(totalLength);
-      let offset = 0;
-      for (const arr of arrays) {
-        merged.set(arr, offset);
-        offset += arr.length;
-      }
-      return merged;
-    }
-
-    async function startRecording(): Promise<void> {
-      if (!activeProjectPath) return;
-      recorders = [];
-      speechSegments = [];
-      audioChunkBuffer = [];
-
-      if (screenStream) {
-        const srcTrack = screenStream.getVideoTracks()[0]!;
-        const settings = srcTrack.getSettings();
-        const recCanvas = document.createElement('canvas');
-        recCanvas.width = settings.width || 1920;
-        recCanvas.height = settings.height || 1080;
-        mouseTrailCaptureWidth = recCanvas.width;
-        mouseTrailCaptureHeight = recCanvas.height;
-        const recCtx = recCanvas.getContext('2d', { alpha: false })!;
-        recCtx.drawImage(screenVideo, 0, 0, recCanvas.width, recCanvas.height);
-        screenRecInterval = setInterval(() => {
-          recCtx.drawImage(screenVideo, 0, 0, recCanvas.width, recCanvas.height);
-        }, 1000 / 30);
-        const screenOnly = addAudioToStream(recCanvas.captureStream(30));
-        recorders.push(createRecorder(screenOnly, 'screen'));
-      }
-
-      // Window capture recording
-      windowRecIntervals = [];
-      for (let i = 0; i < windowStreams.length && i < 2; i++) {
-        const wStream = windowStreams[i]!;
-        const wVideo = windowVideos[i]!;
-        const srcTrack = wStream.getVideoTracks()[0];
-        if (!srcTrack) continue;
-        const settings = srcTrack.getSettings();
-        const wCanvas = document.createElement('canvas');
-        wCanvas.width = settings.width || 1920;
-        wCanvas.height = settings.height || 1080;
-        if (i === 0) {
-          mouseTrailCaptureWidth = wCanvas.width;
-          mouseTrailCaptureHeight = wCanvas.height;
-        }
-        const wCtx = wCanvas.getContext('2d', { alpha: false })!;
-        wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
-        const interval = setInterval(() => {
-          wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
-        }, 1000 / 30);
-        windowRecIntervals.push(interval);
-        const winOnly = addAudioToStream(wCanvas.captureStream(30));
-        recorders.push(createRecorder(winOnly, `win${i}`));
-      }
-
-      if (cameraStream) {
-        const cameraOnly = addAudioToStream(new MediaStream(cameraStream.getVideoTracks()));
-        recorders.push(createRecorder(cameraOnly, 'camera'));
-      }
-
-      recorders.forEach(r => r.start());
-      recording = true;
-      updateWorkspaceHeader();
-      recordBtn.textContent = 'Stop';
-      recordBtn.classList.replace('bg-red-600', 'bg-neutral-800');
-      recordBtn.classList.replace('hover:bg-red-700', 'hover:bg-neutral-700');
-      recordBtn.classList.add('border', 'border-neutral-600');
-      screenSelect.disabled = true;
-      screenPickerBtn.classList.add('opacity-50', 'pointer-events-none');
-      cameraSelect.disabled = true;
-      audioSelect.disabled = true;
-
-      startTime = Date.now();
-      timerInterval = setInterval(updateTimer, 200);
-
-      mouseTrailSamples = [];
-      mouseTrailCaptureWidth = null;
-      mouseTrailCaptureHeight = null;
-      window.electronAPI.startMouseTrail().catch(() => {});
-
-      transcriptPanel.classList.remove('hidden');
-      transcriptContent.innerHTML = '';
-      segmentBadge.textContent = '0 segments';
-
-      if (audioContext && audioStream && micSourceNode) {
-        try {
-          const token = await window.electronAPI.getScribeToken();
-          const sampleRate = audioContext.sampleRate;
-
-          const formatMap: Record<number, string> = { 8000: 'pcm_8000', 16000: 'pcm_16000', 22050: 'pcm_22050', 24000: 'pcm_24000', 44100: 'pcm_44100', 48000: 'pcm_48000' };
-          const audioFormat = formatMap[sampleRate] || 'pcm_16000';
-
-          const wsUrl = `wss://api.elevenlabs.io/v1/speech-to-text/realtime`
-            + `?model_id=scribe_v2_realtime`
-            + `&token=${token}`
-            + `&audio_format=${audioFormat}`
-            + `&commit_strategy=vad`
-            + `&include_timestamps=true`
-            + `&vad_silence_threshold_secs=1.0`
-            + `&vad_threshold=0.8`
-            + `&min_speech_duration_ms=200`
-            + `&language_code=eng`;
-
-          scribeWs = new WebSocket(wsUrl);
-
-          scribeWs.onmessage = (event: MessageEvent) => {
-            const msg = JSON.parse(event.data as string) as { message_type: string; text?: string; words?: ScribeToken[] };
-            if (msg.message_type === 'partial_transcript') {
-              updatePartialTranscript(msg.text || '');
-            } else if (msg.message_type === 'committed_transcript_with_timestamps') {
-              commitTranscript(msg as { words?: ScribeToken[] });
-            }
-          };
-
-          scribeWs.onerror = (err: Event) => {
-            console.error('Scribe WebSocket error:', err);
-          };
-
-          if (workletRegistered !== audioContext) {
-            await audioContext.audioWorklet.addModule('audio-processor.js');
-            workletRegistered = audioContext;
-          }
-          scribeWorkletNode = new AudioWorkletNode(audioContext, 'audio-capture');
-          micSourceNode.connect(scribeWorkletNode);
-
-          scribeWorkletNode.port.onmessage = (e: MessageEvent) => {
-            if ((e.data as { pcm?: ArrayBuffer }).pcm) {
-              audioChunkBuffer.push(new Int16Array((e.data as { pcm: ArrayBuffer }).pcm));
-            }
-          };
-
-          scribeAudioOffset = (Date.now() - startTime) / 1000;
-
-          audioSendInterval = setInterval(() => {
-            if (audioChunkBuffer.length === 0 || !scribeWs || scribeWs.readyState !== WebSocket.OPEN) return;
-            const merged = mergeInt16Arrays(audioChunkBuffer);
-            audioChunkBuffer = [];
-            const bytes = new Uint8Array(merged.buffer);
-            const CHUNK = 8192;
-            let binary = '';
-            for (let i = 0; i < bytes.length; i += CHUNK) {
-              binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
-            }
-            const base64 = btoa(binary);
-            scribeWs.send(JSON.stringify({
-              message_type: 'input_audio_chunk',
-              audio_base_64: base64,
-              sample_rate: sampleRate,
-              commit: false
-            }));
-          }, 100);
-
-        } catch (err) {
-          console.warn('Scribe setup failed:', err);
-        }
-      }
-    }
-
-    function updatePartialTranscript(text: string): void {
-      let partial = document.getElementById('partialText');
-      if (!partial) {
-        partial = document.createElement('div');
-        partial.id = 'partialText';
-        partial.className = 'text-neutral-600 italic';
-        transcriptContent.prepend(partial);
-      }
-      partial.textContent = stripNonSpeechAnnotations(text);
-      transcriptContent.scrollTop = 0;
-    }
-
-    function commitTranscript(data: { words?: ScribeToken[] }): void {
-      const partial = document.getElementById('partialText');
-      if (partial) partial.remove();
-
-      const spokenWords = extractSpokenWordTokens(data.words || []);
-      if (spokenWords.length === 0) return;
-
-      const cleanText = stripNonSpeechAnnotations(spokenWords.map(w => w.text).join(' '));
-      if (!cleanText) return;
-
-      speechSegments.push({
-        start: (spokenWords[0]!.start ?? 0) + scribeAudioOffset,
-        end: (spokenWords[spokenWords.length - 1]!.end ?? 0) + scribeAudioOffset,
-        text: cleanText
-      });
-
-      const div = document.createElement('div');
-      div.className = 'mb-2 text-neutral-300 cursor-pointer rounded-md px-1.5 py-0.5 -mx-1 hover:bg-neutral-800/60 transition-colors';
-      div.dataset.segmentIndex = String(speechSegments.length - 1);
-      div.textContent = cleanText;
-      div.addEventListener('click', () => {
-        const idx = parseInt(div.dataset.segmentIndex!, 10);
-        selectSegment(selectedSegmentIndex === idx ? -1 : idx);
-      });
-      transcriptContent.prepend(div);
-      transcriptContent.scrollTop = 0;
-
-      updateSegmentBadge();
-    }
-
-    async function recoverPendingTake(recoveryTake: RecoveryTake): Promise<void> {
-      if (!recoveryTake?.screenPath) return;
-
-      const projectSession = getActiveProjectSession();
-      const existingTake = Array.isArray(activeProject?.takes)
-        ? activeProject.takes.find((take: Take) => take.id === recoveryTake.id)
-        : null;
-      if (existingTake) {
-        await completeRecoveryTake(projectSession.projectPath);
-        return;
-      }
-
-      const takeId = recoveryTake.id || `take-${Date.now()}`;
-      const screenPath = recoveryTake.screenPath;
-      const cameraPath = recoveryTake.cameraPath || null;
-      let recoverySections = normalizeTakeSections(recoveryTake.sections, recoveryTake.recordedDuration);
-      const recoverySegments = Array.isArray(recoveryTake.trimSegments) ? recoveryTake.trimSegments : [];
-      const fallbackSections = buildRemappedSectionsFromSegments(recoverySegments);
-
-      try {
-        if (recoverySegments.length > 0) {
-          const computed = await window.electronAPI.computeSections({
-            segments: recoverySegments
-          });
-          if (!matchesActiveProjectSession(projectSession)) return;
-          recoverySections = (Array.isArray(computed?.sections) && computed.sections.length > 0
-            ? attachSectionTranscripts(computed.sections, fallbackSections)
-            : (fallbackSections.length > 0 ? fallbackSections : recoverySections)) as Section[];
-        }
-
-        recoverySections = recoverySections.map(s => ({ ...s, takeId }));
-
-        if (activeProject) {
-          if (!Array.isArray(activeProject.takes)) activeProject.takes = [];
-          activeProject.takes.push({
-            id: takeId,
-            createdAt: recoveryTake.createdAt || new Date().toISOString(),
-            duration: recoveryTake.recordedDuration,
-            screenPath,
-            cameraPath,
-            sections: recoverySections
-          });
-        }
-
-        const appendResult = appendTakeToTimeline({
-          takeId,
-          screenPath,
-          cameraPath,
-          windowPaths: null,
-          recordedDuration: recoveryTake.recordedDuration,
-          trimSections: recoverySections,
-          projectSession
-        });
-        if (!appendResult || !matchesActiveProjectSession(projectSession)) return;
-
-        if (activeProject && appendResult) {
-          const take = activeProject.takes.find((t: Take) => t.id === takeId);
-          if (take) {
-            take.duration = appendResult.takeDuration;
-            take.sections = appendResult.takeSections;
-          }
-          await persistProjectNow();
-        }
-
-        await completeRecoveryTake(projectSession.projectPath);
-      } catch (error) {
-        console.error('Failed to recover pending take:', error);
-        if (matchesActiveProjectSession(projectSession)) {
-          setWorkspaceView(editorState ? 'timeline' : 'recording');
-        }
-      }
-    }
-
-    function setProcessingProgress(progress: number | null = null): void {
-      if (!processingBar) return;
-      const isDeterminate = Number.isFinite(Number(progress));
-      if (!isDeterminate) {
-        processingBar.classList.add('animate-pulse');
-        processingBar.style.width = '100%';
-        return;
-      }
-
-      const clamped = Math.max(0, Math.min(1, Number(progress)));
-      processingBar.classList.remove('animate-pulse');
-      processingBar.style.width = `${Math.max(2, Math.round(clamped * 100))}%`;
-    }
-
-    function _showProcessingState(title: string, status: string, progress: number | null = null): void {
-      processingTitle.textContent = title || 'Processing...';
-      processingStatus.textContent = status || '';
-      setProcessingProgress(progress);
-      setWorkspaceView('processing');
-    }
-
-    function _buildSectionAnchorSnapshot(keyframes: Keyframe[]): Map<string, Partial<Keyframe>> {
-      const anchors = new Map<string, Partial<Keyframe>>();
-      for (const keyframe of Array.isArray(keyframes) ? keyframes : []) {
-        if (!keyframe.sectionId) continue;
-        anchors.set(keyframe.sectionId, {
-          pipX: keyframe.pipX,
-          pipY: keyframe.pipY,
-          pipVisible: keyframe.pipVisible !== false,
-          cameraFullscreen: !!keyframe.cameraFullscreen,
-          backgroundZoom: clampSectionZoom(keyframe.backgroundZoom),
-          backgroundPanX: clampSectionPan(keyframe.backgroundPanX),
-          backgroundPanY: clampSectionPan(keyframe.backgroundPanY)
-        });
-      }
-      return anchors;
-    }
-
-    function remapManualKeyframesAfterSectionDelete(keyframes: Keyframe[], removedSection: Section): Keyframe[] {
-      const epsilon = 0.001;
-      const removedDuration = Math.max(0, Number(removedSection?.end) - Number(removedSection?.start));
-
-      return (Array.isArray(keyframes) ? keyframes : [])
-        .filter(keyframe => !keyframe.sectionId)
-        .map((keyframe) => {
-          const time = Number(keyframe.time) || 0;
-          if (time >= removedSection.start - epsilon && time < removedSection.end - epsilon) {
-            return null;
-          }
-
-          const nextTime = time >= removedSection.end - epsilon
-            ? roundMs(time - removedDuration)
-            : roundMs(time);
-
-          return {
-            ...keyframe,
-            time: Math.max(0, nextTime)
-          };
-        })
-        .filter((kf): kf is Keyframe => kf !== null)
-        .sort((a, b) => a.time - b.time);
-    }
-
-    function remapOverlaysAfterSectionDelete(
-      overlays: Overlay[],
-      removedSection: Section
-    ): { kept: Overlay[]; removed: Overlay[] } {
-      const epsilon = 0.01;
-      const sectionStart = removedSection.start;
-      const sectionEnd = removedSection.end;
-      const removedDuration = Math.max(0, sectionEnd - sectionStart);
-      const MIN_DURATION = 0.1;
-
-      const kept: Overlay[] = [];
-      const removed: Overlay[] = [];
-
-      for (const o of overlays) {
-        // Phase 1: DELETE — fully within section range
-        if (o.startTime >= sectionStart - epsilon && o.endTime <= sectionEnd + epsilon) {
-          removed.push(o);
-          continue;
-        }
-
-        // Phase 2: TRIM — partial overlap
-        const overlapsStart = o.startTime < sectionStart - epsilon && o.endTime > sectionStart + epsilon && o.endTime <= sectionEnd + epsilon;
-        const overlapsEnd = o.startTime >= sectionStart - epsilon && o.startTime < sectionEnd - epsilon && o.endTime > sectionEnd + epsilon;
-        const spansEntireSection = o.startTime < sectionStart - epsilon && o.endTime > sectionEnd + epsilon;
-
-        if (overlapsStart) {
-          // Overlay starts before section, ends within — trim endTime to sectionStart
-          const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
-          if (isVideoLike) {
-            const originalDuration = o.endTime - o.startTime;
-            const trimmedDuration = sectionStart - o.startTime;
-            const sourceSpan = o.sourceEnd - o.sourceStart;
-            o.sourceEnd = o.sourceStart + (sourceSpan * trimmedDuration / originalDuration);
-          }
-          o.endTime = sectionStart;
-          if (o.endTime - o.startTime < MIN_DURATION) {
-            removed.push(o);
-          } else {
-            kept.push(o);
-          }
-        } else if (overlapsEnd) {
-          // Overlay starts within section, ends after — trim startTime to sectionEnd, then shift
-          const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
-          if (isVideoLike) {
-            const originalDuration = o.endTime - o.startTime;
-            const trimAmount = sectionEnd - o.startTime;
-            const sourceSpan = o.sourceEnd - o.sourceStart;
-            o.sourceStart = o.sourceStart + (sourceSpan * trimAmount / originalDuration);
-          }
-          o.startTime = sectionEnd;
-          // Then shift (Phase 3 applies)
-          o.startTime = roundMs(o.startTime - removedDuration);
-          o.endTime = roundMs(o.endTime - removedDuration);
-          o.startTime = Math.max(0, o.startTime);
-          if (o.endTime - o.startTime < MIN_DURATION) {
-            removed.push(o);
-          } else {
-            kept.push(o);
-          }
-        } else if (spansEntireSection) {
-          // Overlay spans the entire deleted section — shrink by removedDuration
-          const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
-          if (isVideoLike) {
-            const originalDuration = o.endTime - o.startTime;
-            const sourceSpan = o.sourceEnd - o.sourceStart;
-            // Remove the proportion of source corresponding to the deleted section
-            const removedProportion = removedDuration / originalDuration;
-            const removedSourceDuration = sourceSpan * removedProportion;
-            // Shift source content after the cut point
-            o.sourceEnd = roundMs(o.sourceEnd - removedSourceDuration);
-          }
-          o.endTime = roundMs(o.endTime - removedDuration);
-          if (o.endTime - o.startTime < MIN_DURATION) {
-            removed.push(o);
-          } else {
-            kept.push(o);
-          }
-        } else if (o.startTime >= sectionEnd - epsilon) {
-          // Phase 3: SHIFT — overlay entirely after the deleted section
-          o.startTime = Math.max(0, roundMs(o.startTime - removedDuration));
-          o.endTime = roundMs(o.endTime - removedDuration);
-          kept.push(o);
-        } else {
-          // Overlay entirely before the deleted section — no change
-          kept.push(o);
-        }
-      }
-
-      return { kept, removed };
-    }
-
-    function remapAudioOverlaysAfterSectionDelete(
-      audioOverlays: AudioOverlay[],
-      removedSection: Section
-    ): { kept: AudioOverlay[]; removed: AudioOverlay[] } {
-      const epsilon = 0.01;
-      const sectionStart = removedSection.start;
-      const sectionEnd = removedSection.end;
-      const removedDuration = Math.max(0, sectionEnd - sectionStart);
-      const MIN_DURATION = 0.1;
-
-      const kept: AudioOverlay[] = [];
-      const removed: AudioOverlay[] = [];
-
-      for (const ao of audioOverlays) {
-        // Phase 1: DELETE — fully within section range
-        if (ao.startTime >= sectionStart - epsilon && ao.endTime <= sectionEnd + epsilon) {
-          removed.push(ao);
-          continue;
-        }
-
-        // Phase 2: TRIM — partial overlap
-        const overlapsStart = ao.startTime < sectionStart - epsilon && ao.endTime > sectionStart + epsilon && ao.endTime <= sectionEnd + epsilon;
-        const overlapsEnd = ao.startTime >= sectionStart - epsilon && ao.startTime < sectionEnd - epsilon && ao.endTime > sectionEnd + epsilon;
-        const spansEntireSection = ao.startTime < sectionStart - epsilon && ao.endTime > sectionEnd + epsilon;
-
-        if (overlapsStart) {
-          // Audio starts before section, ends within — trim endTime
-          const originalDuration = ao.endTime - ao.startTime;
-          const trimmedDuration = sectionStart - ao.startTime;
-          const sourceSpan = ao.sourceEnd - ao.sourceStart;
-          ao.sourceEnd = ao.sourceStart + (sourceSpan * trimmedDuration / originalDuration);
-          ao.endTime = sectionStart;
-          if (ao.endTime - ao.startTime < MIN_DURATION) {
-            removed.push(ao);
-          } else {
-            kept.push(ao);
-          }
-        } else if (overlapsEnd) {
-          // Audio starts within section, ends after — trim startTime, then shift
-          const originalDuration = ao.endTime - ao.startTime;
-          const trimAmount = sectionEnd - ao.startTime;
-          const sourceSpan = ao.sourceEnd - ao.sourceStart;
-          ao.sourceStart = ao.sourceStart + (sourceSpan * trimAmount / originalDuration);
-          ao.startTime = sectionEnd;
-          // Shift
-          ao.startTime = Math.max(0, roundMs(ao.startTime - removedDuration));
-          ao.endTime = roundMs(ao.endTime - removedDuration);
-          if (ao.endTime - ao.startTime < MIN_DURATION) {
-            removed.push(ao);
-          } else {
-            kept.push(ao);
-          }
-        } else if (spansEntireSection) {
-          // Audio spans entire deleted section — shrink by removedDuration
-          const originalDuration = ao.endTime - ao.startTime;
-          const sourceSpan = ao.sourceEnd - ao.sourceStart;
-          const removedSourceDuration = sourceSpan * (removedDuration / originalDuration);
-          ao.sourceEnd = roundMs(ao.sourceEnd - removedSourceDuration);
-          ao.endTime = roundMs(ao.endTime - removedDuration);
-          if (ao.endTime - ao.startTime < MIN_DURATION) {
-            removed.push(ao);
-          } else {
-            kept.push(ao);
-          }
-        } else if (ao.startTime >= sectionEnd - epsilon) {
-          // Phase 3: SHIFT — entirely after deleted section
-          ao.startTime = Math.max(0, roundMs(ao.startTime - removedDuration));
-          ao.endTime = roundMs(ao.endTime - removedDuration);
-          kept.push(ao);
-        } else {
-          // Entirely before — no change
-          kept.push(ao);
-        }
-      }
-
-      return { kept, removed };
-    }
-
-    async function deleteSelectedSection(): Promise<void> {
-      if (!editorState || editorState.rendering) return;
-      const selectedSection = getSelectedSection();
-      if (!selectedSection) return;
-
-      const selectedIndex = editorState.sections.findIndex(section => section.id === selectedSection.id);
-      if (selectedIndex < 0) return;
-
-      pushUndo();
-
-      editorState.sections = editorState.sections.filter(section => section.id !== selectedSection.id);
-
-      if (selectedSection.saved) {
-        editorState.savedSections.push({ ...selectedSection });
-      } else {
-        await stageTakeIfUnreferenced(selectedSection.takeId!);
-      }
-
-      // Cascade: remap overlays (delete/trim/shift)
-      const overlayResult = remapOverlaysAfterSectionDelete(editorState.overlays, selectedSection);
-      editorState.overlays = overlayResult.kept;
-      for (const removed of overlayResult.removed) {
-        if (removed.saved) {
-          editorState.savedOverlays.push(removed);
-        } else if (removed.mediaType !== 'window') {
-          const stillReferenced = editorState.overlays.some(o => o.mediaPath === removed.mediaPath)
-            || editorState.savedOverlays.some(o => o.mediaPath === removed.mediaPath);
-          if (!stillReferenced && activeProjectPath) {
-            window.electronAPI.stageOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-          }
-        }
-      }
-
-      // Cascade: remap audio overlays (delete/trim/shift)
-      const audioResult = remapAudioOverlaysAfterSectionDelete(editorState.audioOverlays, selectedSection);
-      editorState.audioOverlays = audioResult.kept;
-      for (const removed of audioResult.removed) {
-        if (removed.saved) {
-          editorState.savedAudioOverlays.push(removed);
-        } else {
-          const stillReferenced = editorState.audioOverlays.some(ao => ao.mediaPath === removed.mediaPath)
-            || editorState.savedAudioOverlays.some(ao => ao.mediaPath === removed.mediaPath);
-          if (!stillReferenced && activeProjectPath) {
-            window.electronAPI.stageAudioOverlayFile(activeProjectPath, removed.mediaPath).catch(() => {});
-          }
-        }
-      }
-
-      editorState.selectedOverlayId = null;
-      editorState.selectedAudioOverlayId = null;
-
-      if (editorState.sections.length === 0 && editorState.savedSections.length === 0) {
-        const savedSourceWidth = editorState.sourceWidth || null;
-        const savedSourceHeight = editorState.sourceHeight || null;
-        clearEditorState();
-        if (activeProject) {
-          activeProject = {
-            ...activeProject,
-            timeline: {
-              duration: 0,
-              sections: [],
-              savedSections: [],
-              keyframes: [],
-              selectedSectionId: null,
-              hasCamera: false,
-              sourceWidth: savedSourceWidth,
-              sourceHeight: savedSourceHeight
-            }
-          };
-        }
-        persistProjectNow();
-        setWorkspaceView('recording');
-        return;
-      }
-
-      const remainingAnchors = editorState.keyframes.filter(
-        kf => kf.sectionId && kf.sectionId !== selectedSection.id
-      );
-      const remappedManual = remapManualKeyframesAfterSectionDelete(editorState.keyframes, selectedSection);
-      editorState.keyframes = [...remainingAnchors, ...remappedManual];
-
-      reindexSections(editorState.sections);
-
-      recalculateTimelinePositions();
-      syncSectionAnchorKeyframes();
-
-      if (editorState.sections.length > 0) {
-        const nextSelected = editorState.sections[Math.min(selectedIndex, editorState.sections.length - 1)] || editorState.sections[0]!;
-        editorState.selectedSectionId = nextSelected?.id || null;
-        renderSectionMarkers();
-        refreshWaveform();
-        editorSeek(nextSelected?.start || 0);
-      } else {
-        editorState.selectedSectionId = null;
-        editorState.duration = 0;
-        renderSectionMarkers();
-        refreshWaveform();
-      }
-
-      renderOverlayMarkers();
-      renderAudioOverlayMarkers();
-      renderOverlayList();
-      renderSectionTranscriptList();
-      scheduleProjectSave();
-    }
-
-    function splitSectionAtPlayhead(): void {
-      if (!editorState || editorState.rendering) return;
-
-      const time = editorState.currentTime;
-      const section = findSectionForTime(time);
-      if (!section) return;
-
-      const MIN_DURATION = 0.1;
-      const offsetInSection = time - section.start;
-      const sourceTime = roundMs(section.sourceStart + offsetInSection);
-
-      if (sourceTime - section.sourceStart < MIN_DURATION || section.sourceEnd - sourceTime < MIN_DURATION) return;
-
-      pushUndo();
-
-      const sectionIndex = editorState.sections.findIndex(s => s.id === section.id);
-      if (sectionIndex < 0) return;
-
-      const newSectionId = generateSectionId();
-      const rightSection: Section = {
-        id: newSectionId, index: 0, label: 'temp',
-        start: 0, end: 0, duration: 0,
-        sourceStart: sourceTime,
-        sourceEnd: section.sourceEnd,
-        takeId: section.takeId,
-        transcript: '',
-        saved: !!section.saved,
-        volume: section.volume ?? 1.0
-      };
-
-      section.sourceEnd = sourceTime;
-      editorState.sections.splice(sectionIndex + 1, 0, rightSection);
-
-      reindexSections(editorState.sections);
-
-      recalculateTimelinePositions();
-
-      const newAnchor = buildSplitAnchorKeyframe(
-        editorState.keyframes, section.id, newSectionId,
-        rightSection.start, { pipX: editorState.defaultPipX, pipY: editorState.defaultPipY }
-      );
-      editorState.keyframes.push(newAnchor as Keyframe);
-      editorState.keyframes.sort((a, b) => a.time - b.time);
-
-      editorState.selectedSectionId = newSectionId;
-
-      renderSectionMarkers();
-      refreshWaveform();
-      editorSeek(editorState.currentTime);
-      scheduleProjectSave();
-    }
-
-    function splitAllAtPlayhead(): void {
-      if (!editorState || editorState.rendering) return;
-      const time = editorState.currentTime;
-
-      // Split the section at playhead
-      splitSectionAtPlayhead();
-
-      // Split every visual overlay that spans the playhead
-      for (let i = editorState.overlays.length - 1; i >= 0; i--) {
-        const o = editorState.overlays[i]!;
-        if (time <= o.startTime + 0.1 || time >= o.endTime - 0.1) continue;
-        const splitSourceTime = o.sourceStart + (time - o.startTime);
-        const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
-        const newOverlay: Overlay = {
-          id: generateOverlayId(),
-          trackIndex: o.trackIndex || 0,
-          mediaPath: o.mediaPath,
-          mediaType: o.mediaType,
-          startTime: time,
-          endTime: o.endTime,
-          sourceStart: isVideoLike ? splitSourceTime : 0,
-          sourceEnd: o.sourceEnd,
-          landscape: { ...o.landscape },
-          reel: { ...o.reel },
-          saved: false,
-          ...(o.sourceName ? { sourceName: o.sourceName } : {}),
-          ...(o.sourceWidth ? { sourceWidth: o.sourceWidth } : {}),
-          ...(o.sourceHeight ? { sourceHeight: o.sourceHeight } : {}),
-          ...(o.proxyPath ? { proxyPath: o.proxyPath } : {})
-        };
-        o.endTime = time;
-        if (isVideoLike) { o.sourceEnd = splitSourceTime; }
-        editorState.overlays.splice(i + 1, 0, newOverlay);
-      }
-
-      // Split every audio overlay that spans the playhead
-      for (let i = editorState.audioOverlays.length - 1; i >= 0; i--) {
-        const ao = editorState.audioOverlays[i]!;
-        if (time <= ao.startTime + 0.1 || time >= ao.endTime - 0.1) continue;
-        const splitSourceTime = ao.sourceStart + (time - ao.startTime);
-        const newAo: AudioOverlay = {
-          id: generateAudioOverlayId(),
-          trackIndex: ao.trackIndex || 0,
-          mediaPath: ao.mediaPath,
-          startTime: time,
-          endTime: ao.endTime,
-          sourceStart: splitSourceTime,
-          sourceEnd: ao.sourceEnd,
-          volume: ao.volume,
-          saved: false
-        };
-        ao.endTime = time;
-        ao.sourceEnd = splitSourceTime;
-        editorState.audioOverlays.splice(i + 1, 0, newAo);
-      }
-
-      renderOverlayMarkers();
-      renderAudioOverlayMarkers();
-      scheduleProjectSave();
-    }
-
-    function appendTakeToTimeline({ takeId, screenPath: _screenPath, cameraPath, windowPaths: _appendWindowPaths, recordedDuration, trimSections, projectSession }: AppendTakeOpts): AppendTakeResult | null {
-      const takeSections = normalizeTakeSections(trimSections, recordedDuration);
-      for (const section of takeSections) {
-        section.takeId = takeId;
-      }
-      const takeDuration = takeSections.length > 0
-        ? takeSections[takeSections.length - 1]!.end
-        : Math.max(0, Number(recordedDuration) || 0);
-
-      if (!matchesActiveProjectSession(projectSession)) return null;
-
-      const hasCamera = !!cameraPath;
-
-      // Create window overlays from recorded window paths
-      const windowOverlays: Overlay[] = Array.isArray(_appendWindowPaths) && _appendWindowPaths.length > 0
-        ? createOverlaysFromWindowPaths(_appendWindowPaths, takeDuration)
-        : [];
-
-      if (!editorState) {
-        enterEditor(
-          takeSections,
-          {
-            hasCamera,
-            overlays: windowOverlays.length > 0 ? windowOverlays : undefined,
-            // Window overlay mode uses canvas dimensions as source resolution
-            sourceWidth: windowOverlays.length > 0 ? CANVAS_W : undefined,
-            sourceHeight: windowOverlays.length > 0 ? CANVAS_H : undefined,
-            initialView: 'timeline'
-          }
-        );
-
-        return {
-          takeSections,
-          takeDuration,
-          appendedSections: takeSections
-        };
-      }
-
-      pushUndo();
-
-      const baseDuration = Math.max(0, Number(editorState.duration) || 0);
-      const existingSections = editorState.sections.map(s => ({ ...s }));
-      const existingKeyframes = Array.isArray(editorState.keyframes)
-        ? editorState.keyframes.map(kf => ({ ...kf }))
-        : [];
-
-      const hadCameraBefore = !!editorState.hasCamera;
-      const keepCamera = hadCameraBefore || hasCamera;
-
-      const startIndex = existingSections.length;
-      const appendedSections: Section[] = takeSections.map((section, idx) => {
-        const sectionNumber = startIndex + idx + 1;
-        return {
-          ...section,
-          id: `section-${sectionNumber}`,
-          index: sectionNumber - 1,
-          label: `Section ${sectionNumber}`,
-          start: roundMs(section.start + baseDuration),
-          end: roundMs(section.end + baseDuration),
-          duration: roundMs(section.end - section.start),
-          takeId
-        };
-      });
-
-      const timelineSections = [...existingSections, ...appendedSections];
-
-      const carryState = getStateAtTime(Math.max(0, baseDuration - 0.001));
-      const newAnchors: Keyframe[] = appendedSections.map((section) => ({
-        time: section.start,
-        pipX: carryState.pipX,
-        pipY: carryState.pipY,
-        pipVisible: carryState.pipVisible,
-        cameraFullscreen: !!carryState.cameraFullscreen,
-        backgroundZoom: clampSectionZoom(carryState.backgroundZoom),
-        backgroundPanX: clampSectionPan(carryState.backgroundPanX),
-        backgroundPanY: clampSectionPan(carryState.backgroundPanY),
-        reelCropX: 0,
-        pipScale: normalizePipScale(carryState.pipScale),
-        pipSnapPoint: 'br' as PipSnapPoint,
-        autoTrack: false,
-        autoTrackSmoothing: 0.15,
-        sectionId: section.id,
-        autoSection: true,
-        savedLandscape: null,
-        savedReel: null
-      }));
-
-      const withoutConflictingAnchors = existingKeyframes.filter(
-        kf => !kf.sectionId || !newAnchors.some(anchor => anchor.sectionId === kf.sectionId)
-      );
-
-      // Merge existing overlays with new window overlays (offset by baseDuration)
-      const existingOverlays = editorState?.overlays || [];
-      const offsetWindowOverlays = windowOverlays.map(wo => ({
-        ...wo,
-        startTime: wo.startTime + baseDuration,
-        endTime: wo.endTime + baseDuration,
-      }));
-      const mergedOverlays = [...existingOverlays, ...offsetWindowOverlays];
-
-      enterEditor(
-        timelineSections,
-        {
-          keyframes: [...withoutConflictingAnchors, ...newAnchors].sort((a, b) => a.time - b.time),
-          selectedSectionId: appendedSections[0]?.id || editorState?.selectedSectionId,
-          hasCamera: keepCamera,
-          screenFitMode: editorState?.screenFitMode,
-          sourceWidth: editorState?.sourceWidth,
-          sourceHeight: editorState?.sourceHeight,
-          outputMode: editorState?.outputMode,
-          pipScale: editorState?.pipScale,
-          overlays: mergedOverlays,
-          savedOverlays: editorState?.savedOverlays,
-          audioOverlays: editorState?.audioOverlays,
-          savedAudioOverlays: editorState?.savedAudioOverlays,
-          initialView: 'timeline'
-        }
-      );
-
-      return {
-        takeSections,
-        takeDuration,
-        appendedSections
-      };
-    }
-
-    async function stopRecording(): Promise<void> {
-      const projectSession = getActiveProjectSession();
-      const recordedDuration = (Date.now() - startTime) / 1000;
-      clearInterval(timerInterval!);
-
-      // Stop recorders and canvas intervals immediately so file durations
-      // match recordedDuration (before any async cleanup adds delay).
-      if (screenRecInterval) {
-        clearInterval(screenRecInterval);
-        screenRecInterval = null;
-      }
-      for (const interval of windowRecIntervals) {
-        clearInterval(interval);
-      }
-      windowRecIntervals = [];
-      recorders.forEach(r => {
-        if (r.state !== 'inactive') r.stop();
-      });
-
-      try {
-        mouseTrailSamples = await window.electronAPI.stopMouseTrail();
-      } catch (_) {
-        mouseTrailSamples = [];
-      }
-
-      if (audioSendInterval) {
-        clearInterval(audioSendInterval);
-        audioSendInterval = null;
-      }
-
-      if (scribeWorkletNode) {
-        scribeWorkletNode.port.onmessage = null;
-        if (micSourceNode) micSourceNode.disconnect(scribeWorkletNode);
-        scribeWorkletNode.disconnect();
-        scribeWorkletNode = null;
-      }
-
-      const hadScribe = !!scribeWs;
-      if (scribeWs && scribeWs.readyState === WebSocket.OPEN) {
-        scribeWs.send(JSON.stringify({ message_type: 'commit' }));
-        await new Promise<void>(r => setTimeout(r, 1000));
-        scribeWs.close();
-      }
-      scribeWs = null;
-      audioChunkBuffer = [];
-
-      const results: Record<string, { blob: Blob; path: string }> = {};
-      for (const r of recorders) {
-        results[r.suffix] = await r.blobPromise;
-      }
-
-      recorders = [];
-      recording = false;
-      updateWorkspaceHeader();
-      recordBtn.textContent = 'Record';
-      recordBtn.classList.replace('bg-neutral-800', 'bg-red-600');
-      recordBtn.classList.replace('hover:bg-neutral-700', 'hover:bg-red-700');
-      recordBtn.classList.remove('border', 'border-neutral-600');
-      screenSelect.disabled = false;
-      screenPickerBtn.classList.remove('opacity-50', 'pointer-events-none');
-      cameraSelect.disabled = false;
-      audioSelect.disabled = false;
-      timerEl.textContent = '00:00';
-
-      transcriptPanel.classList.add('hidden');
-
-      // Build windowPaths from results, including captured dimensions
-      const recordedWindowPaths: Array<{ name: string; path: string; width?: number; height?: number }> = [];
-      for (let i = 0; i < 2; i++) {
-        const key = `win${i}`;
-        if (results[key] && windowSourceNames[i]) {
-          let w: number | undefined;
-          let h: number | undefined;
-          if (windowVideos[i]) {
-            w = windowVideos[i]!.videoWidth || undefined;
-            h = windowVideos[i]!.videoHeight || undefined;
-          }
-          recordedWindowPaths.push({ name: windowSourceNames[i]!, path: results[key]!.path, width: w, height: h });
-        }
-      }
-      const hasWindowCaptures = recordedWindowPaths.length > 0;
-      const hasScreen = !!results.screen;
-
-      if (hasScreen || hasWindowCaptures) {
-        const takeId = `take-${Date.now()}`;
-        const takeCreatedAt = new Date().toISOString();
-        const screenPath = results.screen?.path || '';
-        const cameraPath = results.camera?.path || null;
-        let sectionsForTimeline = buildDefaultSectionsForDuration(recordedDuration);
-
-        const activeSegments = speechSegments.filter(s => !s.deleted);
-        const fallbackSections = buildRemappedSectionsFromSegments(activeSegments);
-        await saveRecoveryTake({
-          id: takeId,
-          createdAt: takeCreatedAt,
-          screenPath,
-          cameraPath,
-          recordedDuration,
-          sections: sectionsForTimeline,
-          trimSegments: activeSegments
-        });
-        if (activeSegments.length > 0) {
-          try {
-            const computed = await window.electronAPI.computeSections({
-              segments: activeSegments
-            });
-            sectionsForTimeline = (Array.isArray(computed?.sections) && computed.sections.length > 0
-              ? attachSectionTranscripts(computed.sections, fallbackSections)
-              : (fallbackSections.length > 0 ? fallbackSections : sectionsForTimeline)) as Section[];
-            if (!matchesActiveProjectSession(projectSession)) return;
-          } catch (err) {
-            console.warn('Section computation failed, using fallback sections:', err);
-            if (fallbackSections.length > 0) sectionsForTimeline = fallbackSections as Section[];
-          }
-        } else if (hadScribe) {
-          console.warn('No speech detected, using full recording');
-        }
-
-        sectionsForTimeline = sectionsForTimeline.map(s => ({ ...s, takeId }));
-
-        let mousePath: string | null = null;
-        if (mouseTrailSamples.length > 0 && activeProjectPath) {
-          try {
-            const trailData: MouseTrailData = {
-              captureWidth: mouseTrailCaptureWidth || 1920,
-              captureHeight: mouseTrailCaptureHeight || 1080,
-              interval: 100,
-              trail: mouseTrailSamples
-            };
-            const suffix = takeId.replace('take-', '');
-            mousePath = await window.electronAPI.saveMouseTrail(activeProjectPath, suffix, trailData);
-          } catch (err) {
-            console.warn('Failed to save mouse trail:', err);
-          }
-          mouseTrailSamples = [];
-        }
-
-        if (activeProject) {
-          if (!Array.isArray(activeProject.takes)) activeProject.takes = [];
-          activeProject.takes.push({
-            id: takeId,
-            createdAt: takeCreatedAt,
-            duration: recordedDuration,
-            screenPath: screenPath || null,
-            cameraPath,
-            mousePath: mousePath ? `${activeProjectPath}/${mousePath}` : null,
-            proxyPath: null,
-            windowPaths: hasWindowCaptures ? recordedWindowPaths : null,
-            sections: sectionsForTimeline
-          });
-        }
-
-        try {
-          const appendResult = appendTakeToTimeline({
-            takeId,
-            screenPath: screenPath || '',
-            cameraPath,
-            windowPaths: hasWindowCaptures ? recordedWindowPaths : null,
-            recordedDuration,
-            trimSections: sectionsForTimeline,
-            projectSession
-          });
-          if (!appendResult || !matchesActiveProjectSession(projectSession)) return;
-
-          if (activeProject && appendResult) {
-            const take = activeProject.takes.find((t: Take) => t.id === takeId);
-            if (take) {
-              take.duration = appendResult.takeDuration;
-              take.sections = appendResult.takeSections;
-            }
-            await persistProjectNow();
-            if (activeProjectPath && hasScreen && screenPath) {
-              // Standard screen proxy
-              proxyStatus.set(takeId, { status: 'pending', percent: 0 });
-              renderSectionMarkers();
-              window.electronAPI.generateProxy({ takeId, screenPath, projectFolder: activeProjectPath, durationSec: recordedDuration })
-                .catch((err: unknown) => console.warn('[Proxy] Failed to start proxy generation:', err));
-            } else if (activeProjectPath && hasWindowCaptures) {
-              // Generate a proxy for each window file
-              for (let wi = 0; wi < recordedWindowPaths.length; wi++) {
-                const wp = recordedWindowPaths[wi]!;
-                const proxyKey = `${takeId}-win${wi}`;
-                proxyStatus.set(proxyKey, { status: 'pending', percent: 0 });
-                window.electronAPI.generateProxy({ takeId: proxyKey, screenPath: wp.path, projectFolder: activeProjectPath, durationSec: recordedDuration })
-                  .catch((err: unknown) => console.warn(`[Proxy] Failed for window ${wi}:`, err));
-              }
-              renderSectionMarkers();
-            }
-          }
-          await completeRecoveryTake();
-        } catch (error) {
-          console.error('Failed to append recording to project timeline:', error);
-          setWorkspaceView('recording');
-        }
-      }
-      updateWorkspaceHeader();
-    }
-
-    function updateTimer(): void {
-      const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
-      const s = String(elapsed % 60).padStart(2, '0');
-      timerEl.textContent = `${m}:${s}`;
-    }
-
-    // ===== Editor =====
-
-    function enterEditor(rawSections: Section[], opts: EnterEditorOpts = {}): void {
-      if (drawRAF) { cancelAnimationFrame(drawRAF); drawRAF = null; }
-      cancelEditorDrawLoop();
-
-      timelineZoom = 1;
-      editorTimeline.style.minWidth = '100%';
-      editorTimelineWrapper.scrollLeft = 0;
-
-      cleanupVideoPool();
-
-      const defaultPipX = CANVAS_W - PIP_SIZE - PIP_MARGIN;
-      const defaultPipY = CANVAS_H - PIP_SIZE - PIP_MARGIN;
-      const sections = normalizeSections(rawSections, opts.duration || 0);
-
-      const duration = sections.length > 0
-        ? sections[sections.length - 1]!.end
-        : (opts.duration || 0);
-
-      const sectionKeyframes: Keyframe[] = sections.map(section => ({
-        time: section.start,
-        pipX: defaultPipX,
-        pipY: defaultPipY,
-        pipVisible: true,
-        cameraFullscreen: false,
-        backgroundZoom: DEFAULT_SECTION_ZOOM,
-        backgroundPanX: 0,
-        backgroundPanY: 0,
-        reelCropX: 0,
-        pipScale: DEFAULT_PIP_SCALE,
-        pipSnapPoint: 'br' as PipSnapPoint,
-        autoTrack: false,
-        autoTrackSmoothing: 0.15,
-        sectionId: section.id,
-        autoSection: true,
-        savedLandscape: null,
-        savedReel: null
-      }));
-
-      const outputMode: OutputMode = opts.outputMode === 'reel' ? 'reel' : 'landscape';
-      const minZoomForLoad = outputMode === 'reel' ? MIN_REEL_SECTION_ZOOM : MIN_SECTION_ZOOM;
-
-      const providedKeyframes = Array.isArray(opts.keyframes) && opts.keyframes.length > 0
-        ? opts.keyframes.map(kf => ({
+    return {
+      takeSections,
+      takeDuration,
+      appendedSections: takeSections
+    };
+  }
+
+  pushUndo();
+
+  const baseDuration = Math.max(0, Number(editorState.duration) || 0);
+  const existingSections = editorState.sections.map((s) => ({ ...s }));
+  const existingKeyframes = Array.isArray(editorState.keyframes)
+    ? editorState.keyframes.map((kf) => ({ ...kf }))
+    : [];
+
+  const hadCameraBefore = !!editorState.hasCamera;
+  const keepCamera = hadCameraBefore || hasCamera;
+
+  const startIndex = existingSections.length;
+  const appendedSections: Section[] = takeSections.map((section, idx) => {
+    const sectionNumber = startIndex + idx + 1;
+    return {
+      ...section,
+      id: `section-${sectionNumber}`,
+      index: sectionNumber - 1,
+      label: `Section ${sectionNumber}`,
+      start: roundMs(section.start + baseDuration),
+      end: roundMs(section.end + baseDuration),
+      duration: roundMs(section.end - section.start),
+      takeId
+    };
+  });
+
+  const timelineSections = [...existingSections, ...appendedSections];
+
+  const carryState = getStateAtTime(Math.max(0, baseDuration - 0.001));
+  const newAnchors: Keyframe[] = appendedSections.map((section) => ({
+    time: section.start,
+    pipX: carryState.pipX,
+    pipY: carryState.pipY,
+    pipVisible: carryState.pipVisible,
+    cameraFullscreen: !!carryState.cameraFullscreen,
+    backgroundZoom: clampSectionZoom(carryState.backgroundZoom),
+    backgroundPanX: clampSectionPan(carryState.backgroundPanX),
+    backgroundPanY: clampSectionPan(carryState.backgroundPanY),
+    reelCropX: 0,
+    pipScale: normalizePipScale(carryState.pipScale),
+    pipSnapPoint: 'br' as PipSnapPoint,
+    autoTrack: false,
+    autoTrackSmoothing: 0.15,
+    sectionId: section.id,
+    autoSection: true,
+    savedLandscape: null,
+    savedReel: null
+  }));
+
+  const withoutConflictingAnchors = existingKeyframes.filter(
+    (kf) => !kf.sectionId || !newAnchors.some((anchor) => anchor.sectionId === kf.sectionId)
+  );
+
+  // Merge existing overlays with new window overlays (offset by baseDuration)
+  const existingOverlays = editorState?.overlays || [];
+  const offsetWindowOverlays = windowOverlays.map((wo) => ({
+    ...wo,
+    startTime: wo.startTime + baseDuration,
+    endTime: wo.endTime + baseDuration
+  }));
+  const mergedOverlays = [...existingOverlays, ...offsetWindowOverlays];
+
+  enterEditor(timelineSections, {
+    keyframes: [...withoutConflictingAnchors, ...newAnchors].sort((a, b) => a.time - b.time),
+    selectedSectionId: appendedSections[0]?.id || editorState?.selectedSectionId,
+    hasCamera: keepCamera,
+    screenFitMode: editorState?.screenFitMode,
+    sourceWidth: editorState?.sourceWidth,
+    sourceHeight: editorState?.sourceHeight,
+    outputMode: editorState?.outputMode,
+    pipScale: editorState?.pipScale,
+    overlays: mergedOverlays,
+    savedOverlays: editorState?.savedOverlays,
+    audioOverlays: editorState?.audioOverlays,
+    savedAudioOverlays: editorState?.savedAudioOverlays,
+    initialView: 'timeline'
+  });
+
+  return {
+    takeSections,
+    takeDuration,
+    appendedSections
+  };
+}
+
+// ===== Editor =====
+
+export function enterEditor(rawSections: Section[], opts: EnterEditorOpts = {}): void {
+  if (drawRAF) {
+    cancelAnimationFrame(drawRAF);
+    setDrawRAF(null);
+  }
+  cancelEditorDrawLoop();
+
+  setTimelineZoom(1);
+  editorTimeline.style.minWidth = '100%';
+  editorTimelineWrapper.scrollLeft = 0;
+
+  cleanupVideoPool();
+
+  const defaultPipX = CANVAS_W - PIP_SIZE - PIP_MARGIN;
+  const defaultPipY = CANVAS_H - PIP_SIZE - PIP_MARGIN;
+  const sections = normalizeSections(rawSections, opts.duration || 0);
+
+  const duration = sections.length > 0 ? sections[sections.length - 1]!.end : opts.duration || 0;
+
+  const sectionKeyframes: Keyframe[] = sections.map((section) => ({
+    time: section.start,
+    pipX: defaultPipX,
+    pipY: defaultPipY,
+    pipVisible: true,
+    cameraFullscreen: false,
+    backgroundZoom: DEFAULT_SECTION_ZOOM,
+    backgroundPanX: 0,
+    backgroundPanY: 0,
+    reelCropX: 0,
+    pipScale: DEFAULT_PIP_SCALE,
+    pipSnapPoint: 'br' as PipSnapPoint,
+    autoTrack: false,
+    autoTrackSmoothing: 0.15,
+    sectionId: section.id,
+    autoSection: true,
+    savedLandscape: null,
+    savedReel: null
+  }));
+
+  const outputMode: OutputMode = opts.outputMode === 'reel' ? 'reel' : 'landscape';
+  const minZoomForLoad = outputMode === 'reel' ? MIN_REEL_SECTION_ZOOM : MIN_SECTION_ZOOM;
+
+  const providedKeyframes =
+    Array.isArray(opts.keyframes) && opts.keyframes.length > 0
+      ? opts.keyframes.map((kf) => ({
           ...kf,
-          backgroundZoom: Math.max(minZoomForLoad, Math.min(MAX_SECTION_ZOOM, Number.isFinite(Number(kf.backgroundZoom)) ? Number(kf.backgroundZoom) : DEFAULT_SECTION_ZOOM)),
+          backgroundZoom: Math.max(
+            minZoomForLoad,
+            Math.min(
+              MAX_SECTION_ZOOM,
+              Number.isFinite(Number(kf.backgroundZoom))
+                ? Number(kf.backgroundZoom)
+                : DEFAULT_SECTION_ZOOM
+            )
+          ),
           backgroundPanX: clampSectionPan(kf.backgroundPanX),
           backgroundPanY: clampSectionPan(kf.backgroundPanY),
           reelCropX: clampReelCropX(kf.reelCropX),
           pipScale: normalizePipScale(kf.pipScale)
         }))
-        : null;
-      const keyframes = (providedKeyframes || sectionKeyframes).sort((a, b) => a.time - b.time);
-      const pipScale = (() => {
-        const v = Number(opts.pipScale);
-        if (opts.pipScale == null || !Number.isFinite(v)) return DEFAULT_PIP_SCALE;
-        return Math.max(MIN_PIP_SCALE, Math.min(MAX_PIP_SCALE, v));
-      })();
-      const effectiveW = outputMode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
-      const effectiveH = outputMode === 'reel' ? REEL_CANVAS_H : CANVAS_H;
-      const effectivePipSize = computePipSize(pipScale, effectiveW);
-      const effDefaultPipX = effectiveW - effectivePipSize - PIP_MARGIN;
-      const effDefaultPipY = effectiveH - effectivePipSize - PIP_MARGIN;
+      : null;
+  const keyframes = (providedKeyframes || sectionKeyframes).sort((a, b) => a.time - b.time);
+  const pipScale = (() => {
+    const v = Number(opts.pipScale);
+    if (opts.pipScale == null || !Number.isFinite(v)) return DEFAULT_PIP_SCALE;
+    return Math.max(MIN_PIP_SCALE, Math.min(MAX_PIP_SCALE, v));
+  })();
+  const effectiveW = outputMode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
+  const effectiveH = outputMode === 'reel' ? REEL_CANVAS_H : CANVAS_H;
+  const effectivePipSize = computePipSize(pipScale, effectiveW);
+  const effDefaultPipX = effectiveW - effectivePipSize - PIP_MARGIN;
+  const effDefaultPipY = effectiveH - effectivePipSize - PIP_MARGIN;
 
-      editorState = {
-        duration,
-        currentTime: 0,
-        playing: false,
-        pipSize: effectivePipSize,
-        defaultPipX: effDefaultPipX,
-        defaultPipY: effDefaultPipY,
-        keyframes,
-        sections,
-        savedSections: opts.savedSections || [],
-        selectedSectionId: opts.selectedSectionId || sections[0]?.id || null,
-        screenFitMode: opts.screenFitMode || screenFitSelect.value,
-        rendering: false,
-        renderProgress: 0,
-        playbackSpeed: 1,
-        cameraSyncOffsetMs: normalizeCameraSyncOffsetMs(opts.cameraSyncOffsetMs),
-        hasCamera: typeof opts.hasCamera === 'boolean' ? opts.hasCamera : false,
-        sourceWidth: opts.sourceWidth || null,
-        sourceHeight: opts.sourceHeight || null,
-        outputMode,
-        pipScale,
-        overlays: Array.isArray(opts.overlays) ? opts.overlays : [],
-        savedOverlays: Array.isArray(opts.savedOverlays) ? opts.savedOverlays : [],
-        selectedOverlayId: null,
-        audioOverlays: Array.isArray(opts.audioOverlays) ? opts.audioOverlays : [],
-        savedAudioOverlays: Array.isArray(opts.savedAudioOverlays) ? opts.savedAudioOverlays : [],
-        selectedAudioOverlayId: null
-      };
-      screenFitSelect.value = editorState.screenFitMode === 'fit' ? 'fit' : 'fill';
-      cameraSyncOffsetInput.value = String(editorState.cameraSyncOffsetMs);
-      updateSectionZoomControls();
-      updateOutputModeUI();
+  const newEditorState: EditorState = {
+    duration,
+    currentTime: 0,
+    playing: false,
+    pipSize: effectivePipSize,
+    defaultPipX: effDefaultPipX,
+    defaultPipY: effDefaultPipY,
+    keyframes,
+    sections,
+    savedSections: opts.savedSections || [],
+    selectedSectionId: opts.selectedSectionId || sections[0]?.id || null,
+    screenFitMode: opts.screenFitMode || screenFitSelect.value,
+    rendering: false,
+    renderProgress: 0,
+    playbackSpeed: 1,
+    cameraSyncOffsetMs: normalizeCameraSyncOffsetMs(opts.cameraSyncOffsetMs),
+    hasCamera: typeof opts.hasCamera === 'boolean' ? opts.hasCamera : false,
+    sourceWidth: opts.sourceWidth || null,
+    sourceHeight: opts.sourceHeight || null,
+    outputMode,
+    pipScale,
+    overlays: Array.isArray(opts.overlays) ? opts.overlays : [],
+    savedOverlays: Array.isArray(opts.savedOverlays) ? opts.savedOverlays : [],
+    selectedOverlayId: null,
+    audioOverlays: Array.isArray(opts.audioOverlays) ? opts.audioOverlays : [],
+    savedAudioOverlays: Array.isArray(opts.savedAudioOverlays) ? opts.savedAudioOverlays : [],
+    selectedAudioOverlayId: null
+  };
+  setEditorState(newEditorState);
+  screenFitSelect.value = newEditorState.screenFitMode === 'fit' ? 'fit' : 'fill';
+  cameraSyncOffsetInput.value = String(newEditorState.cameraSyncOffsetMs);
+  updateSectionZoomControls();
+  updateOutputModeUI();
 
-      const referencedTakeIds = new Set(sections.map(s => s.takeId).filter(Boolean) as string[]);
-      for (const takeId of referencedTakeIds) {
-        getOrCreateTakeVideos(takeId);
-        loadMouseTrail(takeId).catch(() => {});
-      }
+  const referencedTakeIds = new Set(sections.map((s) => s.takeId).filter(Boolean) as string[]);
+  for (const takeId of referencedTakeIds) {
+    getOrCreateTakeVideos(takeId);
+    loadMouseTrail(takeId).catch(() => {});
+  }
 
-      if (sections.length > 0) {
-        const firstSection = sections[0]!;
-        activeTakeId = firstSection.takeId;
-        activePlaybackSection = firstSection;
-        const videos = getOrCreateTakeVideos(firstSection.takeId!);
-        if (videos) {
-          videos.screen.currentTime = firstSection.sourceStart;
-          if (videos.camera) {
-            videos.camera.currentTime = resolveCameraPlaybackTargetTime(
-              firstSection.sourceStart,
-              editorState.cameraSyncOffsetMs
-            );
-          }
-        }
-      }
-
-      if (referencedTakeIds.size > 0) {
-        const firstTakeId = sections[0]?.takeId;
-        const firstTake = activeProject?.takes?.find((t: Take) => t.id === firstTakeId);
-        const videos = firstTakeId ? getOrCreateTakeVideos(firstTakeId) : null;
-        if (videos) {
-          const applySourceResolution = (w: number, h: number) => {
-            if (!editorState) return;
-            if (w && h) {
-              editorState.sourceWidth = w;
-              editorState.sourceHeight = h;
-            }
-            syncSectionAnchorKeyframes();
-            renderSectionMarkers();
-            updateEditorTimeDisplay();
-            scheduleProjectSave();
-            extractWaveformPeaks().then(peaks => {
-              if (!editorState) return;
-              waveformPeaks = peaks;
-              renderWaveform();
-            });
-          };
-
-          // In window overlay mode, the output is always the canvas size (1920x1080)
-          // — individual window dimensions don't define the output.
-          const hasWindowOverlaysOnLoad = editorState.overlays.some(o => o.mediaType === 'window');
-          if (hasWindowOverlaysOnLoad) {
-            applySourceResolution(CANVAS_W, CANVAS_H);
-          } else if (firstTake?.proxyPath && firstTake?.screenPath) {
-            const sourceProbe = document.createElement('video');
-            sourceProbe.preload = 'metadata';
-            sourceProbe.src = pathToFileUrl(firstTake.screenPath);
-            sourceProbe.addEventListener('loadedmetadata', () => {
-              applySourceResolution(sourceProbe.videoWidth, sourceProbe.videoHeight);
-              sourceProbe.src = '';
-            }, { once: true });
-          } else {
-            const onMeta = () => applySourceResolution(videos.screen.videoWidth, videos.screen.videoHeight);
-            if (videos.screen.readyState >= 1) onMeta();
-            else videos.screen.addEventListener('loadedmetadata', onMeta, { once: true });
-          }
-        }
-      }
-
-      updateEditorTimeDisplay();
-      renderSectionMarkers();
-      const initialView = opts.initialView === 'recording' ? 'recording' : 'timeline';
-      setWorkspaceView(initialView);
-    }
-
-    function _exitEditor(): void {
-      setWorkspaceView('recording');
-    }
-
-    function getStateAtTime(time: number): VisualState {
-      const defaultKf = {
-        time: 0,
-        pipX: editorState!.defaultPipX,
-        pipY: editorState!.defaultPipY,
-        pipVisible: true,
-        cameraFullscreen: false,
-        backgroundZoom: DEFAULT_SECTION_ZOOM,
-        backgroundPanX: 0,
-        backgroundPanY: 0,
-        reelCropX: 0,
-        pipScale: editorState!.pipScale || DEFAULT_PIP_SCALE,
-        pipSnapPoint: 'br' as PipSnapPoint,
-        autoTrack: false,
-        autoTrackSmoothing: 0.15
-      };
-      const userKfs = editorState!.keyframes;
-      const kfs = userKfs.length > 0 && userKfs[0]!.time === 0 ? userKfs : [defaultKf as Keyframe, ...userKfs];
-
-      let activeIdx = 0;
-      for (let i = 1; i < kfs.length; i++) {
-        if (kfs[i]!.time <= time) activeIdx = i;
-        else break;
-      }
-
-      const active = kfs[activeIdx]!;
-      const next = activeIdx < kfs.length - 1 ? kfs[activeIdx + 1]! : null;
-
-      let pipX = active.pipX;
-      let pipY = active.pipY;
-      let opacity = active.pipVisible ? 1 : 0;
-      let cameraFullscreen = active.cameraFullscreen || false;
-      let camTransition = cameraFullscreen ? 1 : 0;
-      let backgroundZoom = clampSectionZoom(active.backgroundZoom);
-      let backgroundPanX = clampSectionPan(active.backgroundPanX);
-      let backgroundPanY = clampSectionPan(active.backgroundPanY);
-      let backgroundFocusX = panToFocusCoord(backgroundZoom, backgroundPanX, 0.5);
-      let backgroundFocusY = panToFocusCoord(backgroundZoom, backgroundPanY, 0.5);
-      let reelCropX = clampReelCropX(active.reelCropX);
-      let pipScale = normalizePipScale(active.pipScale);
-
-      if (next) {
-        const remaining = next.time - time;
-        if (remaining > 0 && remaining < TRANSITION_DURATION) {
-          const t = 1 - remaining / TRANSITION_DURATION;
-          const nextVisible = next.pipVisible !== undefined ? next.pipVisible : true;
-          const nextFullscreen = next.cameraFullscreen || false;
-
-          if (active.pipVisible !== nextVisible) {
-            if (nextVisible) {
-              opacity = t;
-              pipX = next.pipX;
-              pipY = next.pipY;
-              cameraFullscreen = nextFullscreen;
-              camTransition = nextFullscreen ? 1 : 0;
-            } else {
-              opacity = 1 - t;
-              camTransition = cameraFullscreen ? 1 : 0;
-            }
-          } else {
-            if (cameraFullscreen !== nextFullscreen) {
-              camTransition = nextFullscreen ? t : 1 - t;
-              if (!nextFullscreen) {
-                pipX = next.pipX;
-                pipY = next.pipY;
-              }
-            }
-
-            if (!cameraFullscreen && !nextFullscreen
-                && (active.pipX !== next.pipX || active.pipY !== next.pipY)) {
-              pipX = active.pipX + (next.pipX - active.pipX) * t;
-              pipY = active.pipY + (next.pipY - active.pipY) * t;
-            }
-          }
-
-          if (Math.abs(backgroundZoom - clampSectionZoom(next.backgroundZoom)) > 0.0001) {
-            backgroundZoom = backgroundZoom + (clampSectionZoom(next.backgroundZoom) - backgroundZoom) * t;
-          }
-          const nextFocusX = panToFocusCoord(next.backgroundZoom, next.backgroundPanX, 0.5);
-          const nextFocusY = panToFocusCoord(next.backgroundZoom, next.backgroundPanY, 0.5);
-          backgroundFocusX = backgroundFocusX + (nextFocusX - backgroundFocusX) * t;
-          backgroundFocusY = backgroundFocusY + (nextFocusY - backgroundFocusY) * t;
-          backgroundPanX = focusToPanCoord(backgroundZoom, backgroundFocusX, backgroundPanX);
-          backgroundPanY = focusToPanCoord(backgroundZoom, backgroundFocusY, backgroundPanY);
-
-          const nextReelCropX = clampReelCropX(next.reelCropX);
-          if (Math.abs(reelCropX - nextReelCropX) > 0.0001) {
-            reelCropX = reelCropX + (nextReelCropX - reelCropX) * t;
-          }
-
-          const nextPipScale = normalizePipScale(next.pipScale);
-          if (Math.abs(pipScale - nextPipScale) > 0.0001) {
-            pipScale = pipScale + (nextPipScale - pipScale) * t;
-          }
-        }
-      }
-
-      if (active.autoTrack && backgroundZoom > 1.0001) {
-        const activeSection = findSectionForTime(time);
-        if (activeSection) {
-          const trailData = getMouseTrailForTake(activeSection.takeId!);
-          if (trailData && trailData.trail && trailData.trail.length > 0) {
-            const sourceTime = activeSection.sourceStart + (time - activeSection.start);
-            const smoothed = lookupSmoothedMouseAt(
-              trailData.trail, sourceTime,
-              active.autoTrackSmoothing || 0.15,
-              trailData.captureWidth, trailData.captureHeight
-            );
-            backgroundFocusX = smoothed.focusX;
-            backgroundFocusY = smoothed.focusY;
-          }
-        }
-      }
-
-      return {
-        pipX,
-        pipY,
-        pipVisible: opacity > 0,
-        opacity,
-        cameraFullscreen,
-        camTransition,
-        backgroundZoom,
-        backgroundPanX,
-        backgroundPanY,
-        backgroundFocusX,
-        backgroundFocusY,
-        reelCropX,
-        pipScale,
-        pipSnapPoint: (active.pipSnapPoint || 'br') as PipSnapPoint,
-        autoTrack: !!active.autoTrack,
-        autoTrackSmoothing: active.autoTrackSmoothing || 0.15
-      };
-    }
-
-    function getOverlayStateAtTime(time: number, trackIndex?: number): OverlayState {
-      if (!editorState || !Array.isArray(editorState.overlays) || editorState.overlays.length === 0) {
-        return { active: false };
-      }
-      const dur = editorState.duration || 0;
-      if (trackIndex !== undefined) {
-        const trackOverlays = editorState.overlays.filter(o => (o.trackIndex || 0) === trackIndex);
-        return _getOverlayStateAtTime(time, trackOverlays, editorState.outputMode, dur);
-      }
-      return _getOverlayStateAtTime(time, editorState.overlays, editorState.outputMode, dur);
-    }
-
-    function getTimelineBoundaries(): number[] {
-      const times = new Set<number>();
-      if (editorState!.sections) {
-        for (const s of editorState!.sections) {
-          times.add(s.start);
-          times.add(s.end);
-        }
-      }
-      if (editorState!.overlays) {
-        for (const o of editorState!.overlays) {
-          times.add(o.startTime);
-          times.add(o.endTime);
-        }
-      }
-      return [...times].sort((a, b) => a - b);
-    }
-
-    function formatTime(seconds: number): string {
-      const m = String(Math.floor(seconds / 60)).padStart(2, '0');
-      const s = String(Math.floor(seconds % 60)).padStart(2, '0');
-      return `${m}:${s}`;
-    }
-
-    function updateEditorTimeDisplay(): void {
-      if (!editorState) return;
-      const selectedSection = getSelectedSection();
-      const sectionText = selectedSection ? ` | ${selectedSection.label}` : '';
-      const speedText = editorState.playbackSpeed !== 1 ? ` [${editorState.playbackSpeed}x]` : '';
-      editorTimeEl.textContent = `${formatTime(editorState.currentTime)} / ${formatTime(editorState.duration)}${speedText}${sectionText}`;
-    }
-
-    function switchPlaybackSection(nextSection: Section, opts: { sourceTime?: number; resumePlayback?: boolean; logSwitch?: boolean; reason?: string; fromSectionId?: string | null } = {}): boolean {
-      if (!editorState || !nextSection) return false;
-      const previousTakeId = activeTakeId;
-      const sameTake = previousTakeId === nextSection.takeId;
-      const nextVideos = getOrCreateTakeVideos(nextSection.takeId!);
-      if (!nextVideos) return false;
-
-      const targetSourceTime = Number.isFinite(Number(opts.sourceTime))
-        ? Number(opts.sourceTime)
-        : nextSection.sourceStart;
-      const targetCameraTime = resolveCameraPlaybackTargetTime(
-        targetSourceTime,
-        editorState.cameraSyncOffsetMs
-      );
-      const currentSourceTime = Number(nextVideos.screen.currentTime);
-      const needsSeek = !Number.isFinite(currentSourceTime) || Math.abs(currentSourceTime - targetSourceTime) > 0.01;
-
-      if (!sameTake && previousTakeId) {
-        const previousVideos = getOrCreateTakeVideos(previousTakeId);
-        if (previousVideos) {
-          previousVideos.screen.pause();
-          if (previousVideos.camera) {
-            previousVideos.camera.pause();
-            previousVideos.camera.playbackRate = 1;
-          }
-        }
-      }
-
-      if (needsSeek) {
-        nextVideos.screen.currentTime = targetSourceTime;
-        if (nextVideos.camera) nextVideos.camera.currentTime = targetCameraTime;
-      }
-
-      activeTakeId = nextSection.takeId;
-      activePlaybackSection = nextSection;
-
-      if (opts.logSwitch) {
-        console.debug('[Editor] Section switch', {
-          from: opts.fromSectionId || null,
-          to: nextSection.id,
-          sameTake,
-          seek: needsSeek,
-          reason: opts.reason || 'unknown'
-        });
-      }
-
-      if (opts.resumePlayback) {
-        const speed = editorState.playbackSpeed || 1;
-        nextVideos.screen.playbackRate = speed;
-        if (nextVideos.screen.paused) nextVideos.screen.play().catch(() => {});
-        if (editorState.hasCamera && nextVideos.camera && nextVideos.camera.paused) {
-          nextVideos.camera.playbackRate = speed;
-          nextVideos.camera.play().catch(() => {});
-        }
-      }
-
-      return true;
-    }
-
-    function syncCameraPlayback(videos: TakeVideos): void {
-      if (!editorState?.hasCamera || !videos?.camera) return;
-
-      const baseRate = editorState.playbackSpeed || 1;
-      const drift = computeCameraPlaybackDrift(
-        videos.screen.currentTime,
-        videos.camera.currentTime,
-        editorState.cameraSyncOffsetMs
-      );
-      const absDrift = Math.abs(drift);
-      const now = performance.now();
-
-      if (absDrift >= CAMERA_DRIFT_HARD_THRESHOLD && now >= cameraResyncCooldownUntil) {
+  if (sections.length > 0) {
+    const firstSection = sections[0]!;
+    setActiveTakeId(firstSection.takeId);
+    setActivePlaybackSection(firstSection);
+    const videos = getOrCreateTakeVideos(firstSection.takeId!);
+    if (videos) {
+      videos.screen.currentTime = firstSection.sourceStart;
+      if (videos.camera) {
         videos.camera.currentTime = resolveCameraPlaybackTargetTime(
-          videos.screen.currentTime,
-          editorState.cameraSyncOffsetMs
-        );
-        videos.camera.playbackRate = baseRate;
-        cameraResyncCooldownUntil = now + CAMERA_RESYNC_COOLDOWN_MS;
-        console.debug('[Editor] Camera hard resync', {
-          drift: Number(drift.toFixed(3)),
-          threshold: CAMERA_DRIFT_HARD_THRESHOLD
-        });
-        return;
-      }
-
-      if (absDrift >= CAMERA_DRIFT_SOFT_THRESHOLD) {
-        const correction = Math.min(0.06, absDrift * 0.5);
-        const targetRate = drift > 0 ? baseRate + correction : baseRate - correction;
-        const clampedRate = Math.max(baseRate - 0.08, Math.min(baseRate + 0.08, targetRate));
-        if (Math.abs(videos.camera.playbackRate - clampedRate) > 0.004) {
-          videos.camera.playbackRate = clampedRate;
-        }
-        if (absDrift >= CAMERA_DRIFT_LOG_THRESHOLD && now - lastCameraDriftLogAt >= CAMERA_DRIFT_LOG_INTERVAL_MS) {
-          console.debug('[Editor] Camera drift', {
-            drift: Number(drift.toFixed(3)),
-            playbackRate: Number(clampedRate.toFixed(3))
-          });
-          lastCameraDriftLogAt = now;
-        }
-      } else if (Math.abs(videos.camera.playbackRate - baseRate) > 0.001) {
-        videos.camera.playbackRate = baseRate;
-      }
-    }
-
-    // === Audio overlay playback preview ===
-    const audioBufferCache = new Map<string, AudioBuffer>();
-    const audioOverlayPeakCache = new Map<string, { min: Float32Array; max: Float32Array }>();
-    let audioOverlayContext: AudioContext | null = null;
-    let activeAudioOverlayNodes: Array<{ source: AudioBufferSourceNode; gain: GainNode; aoId: string }> = [];
-
-    function getAudioOverlayContext(): AudioContext {
-      if (!audioOverlayContext || audioOverlayContext.state === 'closed') {
-        audioOverlayContext = new AudioContext();
-      }
-      return audioOverlayContext;
-    }
-
-    async function decodeAndCacheAudioBuffer(mediaPath: string): Promise<AudioBuffer | null> {
-      if (audioBufferCache.has(mediaPath)) return audioBufferCache.get(mediaPath)!;
-      if (!activeProjectPath) return null;
-      const fileUrl = window.electronAPI.pathToFileUrl(activeProjectPath + '/' + mediaPath);
-      try {
-        const response = await fetch(fileUrl);
-        const arrayBuffer = await response.arrayBuffer();
-        const ctx = getAudioOverlayContext();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        audioBufferCache.set(mediaPath, audioBuffer);
-        // Extract peak data for waveform
-        extractPeakData(mediaPath, audioBuffer);
-        return audioBuffer;
-      } catch (err) {
-        console.error('Failed to decode audio overlay:', mediaPath, err);
-        return null;
-      }
-    }
-
-    function extractPeakData(mediaPath: string, audioBuffer: AudioBuffer): void {
-      if (audioOverlayPeakCache.has(mediaPath)) return;
-      const channel = audioBuffer.getChannelData(0);
-      const numPeaks = Math.min(1000, channel.length);
-      const samplesPerPeak = Math.max(1, Math.floor(channel.length / numPeaks));
-      const minPeaks = new Float32Array(numPeaks);
-      const maxPeaks = new Float32Array(numPeaks);
-      for (let i = 0; i < numPeaks; i++) {
-        let min = 1;
-        let max = -1;
-        const start = i * samplesPerPeak;
-        const end = Math.min(start + samplesPerPeak, channel.length);
-        for (let j = start; j < end; j++) {
-          const val = channel[j]!;
-          if (val < min) min = val;
-          if (val > max) max = val;
-        }
-        minPeaks[i] = min;
-        maxPeaks[i] = max;
-      }
-      audioOverlayPeakCache.set(mediaPath, { min: minPeaks, max: maxPeaks });
-    }
-
-    function drawWaveformOnCanvas(
-      canvas: HTMLCanvasElement,
-      peaks: { min: Float32Array; max: Float32Array },
-      sourceStart: number,
-      sourceEnd: number,
-      totalDuration: number
-    ): void {
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      const w = canvas.width;
-      const h = canvas.height;
-      const midY = h / 2;
-
-      // Map source range to peak indices
-      const totalPeaks = peaks.min.length;
-      const startIdx = Math.floor((sourceStart / totalDuration) * totalPeaks);
-      const endIdx = Math.ceil((sourceEnd / totalDuration) * totalPeaks);
-      const rangeLen = Math.max(1, endIdx - startIdx);
-
-      ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = 'rgba(20, 184, 166, 0.6)';
-      for (let x = 0; x < w; x++) {
-        const peakIdx = startIdx + Math.floor((x / w) * rangeLen);
-        const clampedIdx = Math.max(0, Math.min(totalPeaks - 1, peakIdx));
-        const minVal = peaks.min[clampedIdx]!;
-        const maxVal = peaks.max[clampedIdx]!;
-        const top = midY - maxVal * midY;
-        const bottom = midY - minVal * midY;
-        ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
-      }
-    }
-
-    function startAudioOverlayPlayback(): void {
-      stopAudioOverlayPlayback();
-      if (!editorState || !editorState.audioOverlays.length) return;
-      const ctx = getAudioOverlayContext();
-      if (ctx.state === 'suspended') ctx.resume();
-      const time = editorState.currentTime;
-
-      for (const ao of editorState.audioOverlays) {
-        if (time >= ao.endTime || time < ao.startTime) continue;
-        const buffer = audioBufferCache.get(ao.mediaPath);
-        if (!buffer) continue;
-
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        const gain = ctx.createGain();
-        gain.gain.value = ao.volume;
-        source.connect(gain);
-        gain.connect(ctx.destination);
-
-        const offset = ao.sourceStart + (time - ao.startTime);
-        const remaining = ao.sourceEnd - offset;
-        if (remaining <= 0) continue;
-        source.start(0, offset, remaining);
-        activeAudioOverlayNodes.push({ source, gain, aoId: ao.id });
-      }
-    }
-
-    function stopAudioOverlayPlayback(): void {
-      for (const node of activeAudioOverlayNodes) {
-        try { node.source.stop(); } catch (_) { /* already stopped */ }
-        try { node.source.disconnect(); node.gain.disconnect(); } catch (_) { /* ok */ }
-      }
-      activeAudioOverlayNodes = [];
-    }
-
-    function clearAudioBufferCache(): void {
-      audioBufferCache.clear();
-      audioOverlayPeakCache.clear();
-      stopAudioOverlayPlayback();
-      if (audioOverlayContext && audioOverlayContext.state !== 'closed') {
-        audioOverlayContext.close().catch(() => {});
-        audioOverlayContext = null;
-      }
-    }
-
-    function editorPlay(): void {
-      if (!editorState || editorState.rendering) return;
-      editorState.playing = true;
-      const speed = editorState.playbackSpeed || 1;
-      if (activeTakeId) {
-        const videos = getOrCreateTakeVideos(activeTakeId);
-        if (videos) {
-          videos.screen.playbackRate = speed;
-          videos.screen.play().catch(() => {});
-          if (editorState.hasCamera && videos.camera) {
-            videos.camera.playbackRate = speed;
-            videos.camera.play().catch(() => {});
-          }
-        }
-      }
-      startAudioOverlayPlayback();
-      editorPlayBtn.textContent = 'Pause';
-    }
-
-    function editorPause(): void {
-      if (!editorState) return;
-      editorState.playing = false;
-      for (const [, videos] of takeVideoPool) {
-        videos.screen.pause();
-        videos.screen.playbackRate = 1;
-        if (videos.camera) {
-          videos.camera.pause();
-          videos.camera.playbackRate = 1;
-        }
-      }
-      for (const vel of overlayVideoEls) { if (vel && !vel.paused) vel.pause(); }
-      stopAudioOverlayPlayback();
-      editorPlayBtn.textContent = 'Play';
-      if (editorVideoFrameCallbackId !== null && editorVideoFrameHost) {
-        editorVideoFrameHost.cancelVideoFrameCallback(editorVideoFrameCallbackId);
-        editorVideoFrameCallbackId = null;
-        editorVideoFrameHost = null;
-      }
-      if (!hasPendingEditorDraw()) {
-        scheduleEditorDrawLoop();
-      }
-    }
-
-    function editorTogglePlay(): void {
-      if (!editorState) return;
-      if (editorState.playing) {
-        editorPause();
-      } else {
-        if (editorState.currentTime >= editorState.duration - 0.05) {
-          editorSeek(0);
-        }
-        editorPlay();
-      }
-    }
-
-    function cyclePlaybackSpeed(): void {
-      if (!editorState) return;
-      const speeds = [1, 1.5, 2];
-      const idx = speeds.indexOf(editorState.playbackSpeed);
-      editorState.playbackSpeed = speeds[(idx + 1) % speeds.length]!;
-      if (editorState.playing && activeTakeId) {
-        const videos = getOrCreateTakeVideos(activeTakeId);
-        if (videos) {
-          videos.screen.playbackRate = editorState.playbackSpeed;
-          if (editorState.hasCamera && videos.camera) {
-            videos.camera.playbackRate = editorState.playbackSpeed;
-          }
-        }
-      }
-      updateEditorTimeDisplay();
-    }
-
-    function editorSeek(time: number): void {
-      if (!editorState) return;
-      time = Math.max(0, Math.min(time, editorState.duration));
-      editorState.currentTime = time;
-
-      const resolved = resolveTimeToSource(time);
-      if (resolved) {
-        switchPlaybackSection(
-          resolved.section,
-          {
-            sourceTime: resolved.sourceTime,
-            resumePlayback: editorState.playing,
-            reason: 'seek',
-            fromSectionId: activePlaybackSection?.id
-          }
+          firstSection.sourceStart,
+          newEditorState.cameraSyncOffsetMs
         );
       }
-      syncOverlayVideo(time);
-      // Restart audio overlay playback at new position if playing
-      if (editorState.playing) {
-        startAudioOverlayPlayback();
-      }
-      // Apply section volume to screen video
-      if (resolved && activeTakeId) {
-        const videos = getOrCreateTakeVideos(activeTakeId);
-        if (videos) {
-          videos.screen.volume = resolved.section.volume ?? 1.0;
-        }
-      }
-      updateEditorTimeDisplay();
-      updateScrubberPosition();
     }
+  }
 
-    function syncOverlayVideo(time: number): void {
-      for (let trackIdx = 0; trackIdx < 4; trackIdx++) {
-        const overlayState = getOverlayStateAtTime(time, trackIdx);
-        if (overlayState.active && (overlayState.mediaType === 'video' || overlayState.mediaType === 'window')) {
-          // Prefer proxyPath for window overlays when available
-          const syncOverlayObj = editorState?.overlays.find(o => o.id === overlayState.overlayId);
-          const syncVideoPath = (syncOverlayObj?.proxyPath) || overlayState.mediaPath;
-          const vid = getOverlayVideoElement(syncVideoPath, trackIdx);
-          if (vid && Math.abs(vid.currentTime - overlayState.sourceTime) > 0.15) {
-            vid.currentTime = overlayState.sourceTime;
-          }
-          if (editorState?.playing && vid && vid.paused) {
-            vid.play().catch(() => {});
-          }
-        } else if (overlayVideoEls[trackIdx] && !overlayVideoEls[trackIdx]!.paused) {
-          overlayVideoEls[trackIdx]!.pause();
+  if (referencedTakeIds.size > 0) {
+    const firstTakeId = sections[0]?.takeId;
+    const firstTake = activeProject?.takes?.find((t: Take) => t.id === firstTakeId);
+    const videos = firstTakeId ? getOrCreateTakeVideos(firstTakeId) : null;
+    if (videos) {
+      const applySourceResolution = (w: number, h: number) => {
+        if (!editorState) return;
+        if (w && h) {
+          editorState.sourceWidth = w;
+          editorState.sourceHeight = h;
         }
-      }
-    }
-
-    function updateScrubberPosition(): void {
-      if (!editorState || editorState.duration <= 0) return;
-      const pct = (editorState.currentTime / editorState.duration) * 100;
-      editorScrubber.style.left = pct + '%';
-      if (editorState.playing) scrollTimelineToPlayhead();
-    }
-
-    function editorDrawLoop(): void {
-      if (!editorState) return;
-      try {
-      if (editorState.playing && activeTakeId && activePlaybackSection) {
-        const videos = getOrCreateTakeVideos(activeTakeId);
-        if (videos) {
-          const sourceTime = videos.screen.currentTime;
-          const timelineTime = activePlaybackSection.start + (sourceTime - activePlaybackSection.sourceStart);
-          editorState.currentTime = timelineTime;
-
-          if (sourceTime >= activePlaybackSection.sourceEnd - 0.01) {
-            const currentIdx = editorState.sections.indexOf(activePlaybackSection);
-            const nextSection = editorState.sections[currentIdx + 1];
-
-            if (nextSection) {
-              const fromSectionId = activePlaybackSection?.id;
-              const sameTake = activeTakeId === nextSection.takeId;
-              const contiguousSource = sameTake
-                && Math.abs(sourceTime - nextSection.sourceStart) <= 0.05;
-              switchPlaybackSection(
-                nextSection,
-                {
-                  sourceTime: contiguousSource ? sourceTime : nextSection.sourceStart,
-                  resumePlayback: true,
-                  logSwitch: true,
-                  reason: 'boundary',
-                  fromSectionId
-                }
-              );
-            } else {
-              editorSeek(0);
-              editorPlay();
-            }
-          }
-
-          syncCameraPlayback(videos);
-          syncOverlayVideo(editorState.currentTime);
-        }
-
+        syncSectionAnchorKeyframes();
+        renderSectionMarkers();
         updateEditorTimeDisplay();
-        updateScrubberPosition();
-      }
+        scheduleProjectSave();
+        extractWaveformPeaks().then((peaks) => {
+          if (!editorState) return;
+          setWaveformPeaks(peaks);
+          renderWaveform();
+        });
+      };
 
-      editorCtx.fillStyle = '#000';
-      editorCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-      const activeVideos = activeTakeId ? getOrCreateTakeVideos(activeTakeId) : null;
-      const hasScreen = activeVideos && activeVideos.screen.videoWidth > 0;
-      const hasCamera = editorState.hasCamera && activeVideos?.camera && activeVideos.camera.videoWidth > 0;
-      const state = getStateAtTime(editorState.currentTime);
-
-      // Wallpaper base detection — draw wallpaper if any window overlays exist
-      const hasWindowOverlaysInEditor = (editorState.overlays || []).some(o => o.mediaType === 'window');
-      if (hasWindowOverlaysInEditor) {
-        // Window overlay mode: wallpaper is the base, windows render as overlays
-        drawBackground(editorCtx, CANVAS_W, CANVAS_H);
-      } else if (hasScreen) {
-        // Standard screen recording mode
-        drawEditorScreenWithZoom(
-          editorCtx,
-          activeVideos!.screen,
-          editorState.screenFitMode,
-          state.backgroundZoom,
-          state.backgroundPanX,
-          state.backgroundPanY,
-          state.backgroundFocusX,
-          state.backgroundFocusY
+      // In window overlay mode, the output is always the canvas size (1920x1080)
+      // — individual window dimensions don't define the output.
+      const hasWindowOverlaysOnLoad = newEditorState.overlays.some((o) => o.mediaType === 'window');
+      if (hasWindowOverlaysOnLoad) {
+        applySourceResolution(CANVAS_W, CANVAS_H);
+      } else if (firstTake?.proxyPath && firstTake?.screenPath) {
+        const sourceProbe = document.createElement('video');
+        sourceProbe.preload = 'metadata';
+        sourceProbe.src = pathToFileUrl(firstTake.screenPath);
+        sourceProbe.addEventListener(
+          'loadedmetadata',
+          () => {
+            applySourceResolution(sourceProbe.videoWidth, sourceProbe.videoHeight);
+            sourceProbe.src = '';
+          },
+          { once: true }
         );
+      } else {
+        const onMeta = () =>
+          applySourceResolution(videos.screen.videoWidth, videos.screen.videoHeight);
+        if (videos.screen.readyState >= 1) onMeta();
+        else videos.screen.addEventListener('loadedmetadata', onMeta, { once: true });
       }
-
-      const isReel = editorState.outputMode === 'reel';
-      const editorContentW = isReel ? getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode) : CANVAS_W;
-      const cropPixelX = isReel ? reelCropXToPixelOffset(state.reelCropX, state.backgroundZoom, editorContentW) : 0;
-      const effectiveW = isReel ? REEL_CANVAS_W : CANVAS_W;
-      const currentPipSize = computePipSize(state.pipScale, effectiveW);
-
-      // GROUP 4.3 + 5.3 + 5.4: Iterate all 4 overlay tracks with rounded-corner clipping
-      for (let trackIdx = 0; trackIdx < 4; trackIdx++) {
-        const overlayState = getOverlayStateAtTime(editorState.currentTime, trackIdx);
-        if (!overlayState.active) continue;
-        const oX = overlayState.x;
-        const oY = overlayState.y;
-        const oW = overlayState.width;
-        const oH = overlayState.height;
-        if (oW <= 0 || oH <= 0) continue;
-        const cornerRadius = Math.max(0, Math.min(oW, oH) * 0.03);
-        // For window overlays, prefer proxyPath over mediaPath for playback
-        const overlayObj = editorState.overlays.find(o => o.id === overlayState.overlayId);
-        const videoPath = (overlayObj?.proxyPath) || overlayState.mediaPath;
-        const mediaEl = overlayState.mediaType === 'image'
-          ? getOverlayImageElement(overlayState.mediaPath)
-          : getOverlayVideoElement(videoPath, trackIdx);
-        if (mediaEl && (mediaEl.tagName !== 'IMG' || (mediaEl as HTMLImageElement).complete)) {
-          const inLeft = Math.max(0, oX);
-          const inTop = Math.max(0, oY);
-          const inRight = Math.min(CANVAS_W, oX + oW);
-          const inBottom = Math.min(CANVAS_H, oY + oH);
-          if (oX < 0 || oY < 0 || oX + oW > CANVAS_W || oY + oH > CANVAS_H) {
-            // Overflow: draw at 0.3 alpha first (out-of-bounds ghost)
-            editorCtx.save();
-            editorCtx.globalAlpha = overlayState.opacity * 0.3;
-            editorCtx.beginPath();
-            editorCtx.roundRect(oX, oY, oW, oH, cornerRadius);
-            editorCtx.clip();
-            editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
-            editorCtx.restore();
-            // Then draw the in-bounds portion at full alpha with rounded corners
-            if (inRight > inLeft && inBottom > inTop) {
-              editorCtx.save();
-              editorCtx.globalAlpha = overlayState.opacity;
-              editorCtx.beginPath();
-              editorCtx.rect(inLeft, inTop, inRight - inLeft, inBottom - inTop);
-              editorCtx.clip();
-              editorCtx.beginPath();
-              editorCtx.roundRect(oX, oY, oW, oH, cornerRadius);
-              editorCtx.clip();
-              editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
-              editorCtx.restore();
-            }
-          } else {
-            // Fully in bounds: draw with rounded-corner clipping
-            editorCtx.save();
-            editorCtx.globalAlpha = overlayState.opacity;
-            editorCtx.beginPath();
-            editorCtx.roundRect(oX, oY, oW, oH, cornerRadius);
-            editorCtx.clip();
-            editorCtx.drawImage(mediaEl as CanvasImageSource, oX, oY, oW, oH);
-            editorCtx.restore();
-          }
-        }
-        if (overlayState.overlayId === editorState.selectedOverlayId) {
-          editorCtx.save();
-          editorCtx.strokeStyle = 'rgba(129,140,248,0.8)';
-          editorCtx.lineWidth = 2;
-          editorCtx.setLineDash([6, 4]);
-          editorCtx.strokeRect(oX, oY, oW, oH);
-          editorCtx.setLineDash([]);
-          editorCtx.fillStyle = 'rgba(129,140,248,0.9)';
-          const hs = 14;
-          for (const corner of [[oX, oY], [oX + oW, oY], [oX, oY + oH], [oX + oW, oY + oH]]) {
-            editorCtx.fillRect(corner[0]! - hs / 2, corner[1]! - hs / 2, hs, hs);
-          }
-          editorCtx.restore();
-        }
-      }
-
-      // GROUP 5.2: Camera PIP drawn AFTER all overlay tracks
-      if (hasCamera) {
-        if (state.camTransition > 0 && state.opacity > 0) {
-          editorCtx.save();
-          if (state.opacity < 1) editorCtx.globalAlpha = state.opacity;
-          const t = easeInOut(state.camTransition);
-          const fullW = isReel ? REEL_CANVAS_W : CANVAS_W;
-          const fullH = isReel ? REEL_CANVAS_H : CANVAS_H;
-          const drawPipX = isReel ? state.pipX + cropPixelX : state.pipX;
-          const drawPipY = state.pipY;
-          const camX = drawPipX * (1 - t) + (isReel ? cropPixelX : 0) * t;
-          const camY = drawPipY * (1 - t);
-          const camW = currentPipSize + (fullW - currentPipSize) * t;
-          const camH = currentPipSize + (fullH - currentPipSize) * t;
-          const camR = 12 * (1 - t);
-          drawCameraRect(editorCtx, activeVideos!.camera!, camX, camY, camW, camH, camR);
-          editorCtx.restore();
-        } else if (state.opacity > 0) {
-          editorCtx.save();
-          editorCtx.globalAlpha = state.opacity;
-          const drawPipX = isReel ? state.pipX + cropPixelX : state.pipX;
-          drawPip(editorCtx, activeVideos!.camera!, drawPipX, state.pipY, currentPipSize, currentPipSize);
-          editorCtx.restore();
-        }
-      }
-
-      if (isReel) {
-        editorCtx.save();
-        editorCtx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-        if (cropPixelX > 0) {
-          editorCtx.fillRect(0, 0, cropPixelX, CANVAS_H);
-        }
-        const rightEdge = cropPixelX + REEL_CANVAS_W;
-        if (rightEdge < CANVAS_W) {
-          editorCtx.fillRect(rightEdge, 0, CANVAS_W - rightEdge, CANVAS_H);
-        }
-        editorCtx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
-        editorCtx.lineWidth = 2;
-        editorCtx.setLineDash([8, 6]);
-        editorCtx.strokeRect(cropPixelX, 0, REEL_CANVAS_W, CANVAS_H);
-        editorCtx.restore();
-      }
-
-      } catch (err) {
-        console.error('[editorDrawLoop] Error during draw:', err);
-      }
-      scheduleEditorDrawLoop();
     }
+  }
 
-    // ===== Keyframe management =====
+  updateEditorTimeDisplay();
+  renderSectionMarkers();
+  const initialView = opts.initialView === 'recording' ? 'recording' : 'timeline';
+  setWorkspaceView(initialView);
+}
 
-    function getMutableCameraKeyframe(): Keyframe | null {
-      if (!editorState) return null;
+function _exitEditor(): void {
+  setWorkspaceView('recording');
+}
 
-      const selectedSection = getSelectedSection();
-      if (selectedSection) {
-        return getSectionAnchorKeyframe(selectedSection.id, true);
+// ===== Keyframe management =====
+
+// ===== PiP drag-to-reposition =====
+
+editorCanvas.addEventListener('mousedown', (e: MouseEvent) => {
+  if (!editorState || editorState.rendering) return;
+  const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
+  const kf = getStateAtTime(editorState.currentTime);
+  const isReel = editorState.outputMode === 'reel';
+  const mousedownContentW = isReel
+    ? getContentWidth(
+        editorState.sourceWidth,
+        editorState.sourceHeight,
+        editorState.screenFitMode as 'fit' | 'fill',
+        CANVAS_W,
+        CANVAS_H
+      )
+    : CANVAS_W;
+  const cropOffsetX = isReel
+    ? reelCropXToPixelOffset(kf.reelCropX, kf.backgroundZoom, mousedownContentW)
+    : 0;
+
+  if (editorState.selectedOverlayId) {
+    let overlayS: OverlayState | null = null;
+    for (let t = 3; t >= 0; t--) {
+      const s = getOverlayStateAtTime(editorState.currentTime, t);
+      if (s.active && s.overlayId === editorState.selectedOverlayId) {
+        overlayS = s;
+        break;
       }
-
-      const section = findSectionForTime(editorState.currentTime);
-      if (section) {
-        return getSectionAnchorKeyframe(section.id, true);
-      }
-
-      return null;
     }
-
-    function toggleCameraVisibility(): void {
-      if (!editorState || editorState.rendering) return;
-      const target = getMutableCameraKeyframe();
-      if (!target) return;
-      pushUndo();
-      target.pipVisible = !target.pipVisible;
-      scheduleProjectSave();
-    }
-
-    function toggleCameraFullscreen(): void {
-      if (!editorState || editorState.rendering) return;
-      const target = getMutableCameraKeyframe();
-      if (!target) return;
-      pushUndo();
-      target.cameraFullscreen = !(target.cameraFullscreen || false);
-      scheduleProjectSave();
-    }
-
-    function setSelectedSectionBackgroundZoom(nextZoom: unknown, opts: { pushHistory?: boolean } = {}): boolean {
-      if (!editorState || editorState.rendering) return false;
-      const pushHistory = opts.pushHistory === true;
-      const selectedSection = getSelectedSection();
-      if (!selectedSection) return false;
-      const anchor = getSectionAnchorKeyframe(selectedSection.id, true);
-      if (!anchor) return false;
-      const normalizedZoom = clampSectionZoom(nextZoom);
-      const currentZoom = clampSectionZoom(anchor.backgroundZoom);
-      if (Math.abs(normalizedZoom - currentZoom) < 0.0001) {
-        updateSectionZoomControls();
-        return false;
-      }
-      if (pushHistory) pushUndo();
-      anchor.backgroundZoom = normalizedZoom;
-      updateSectionZoomControls();
-      return true;
-    }
-
-    function setSectionBackgroundPan(sectionId: string, nextPanX: number, nextPanY: number): boolean {
-      if (!editorState || editorState.rendering || !sectionId) return false;
-      const anchor = getSectionAnchorKeyframe(sectionId, true);
-      if (!anchor) return false;
-      const normalizedPanX = clampSectionPan(nextPanX);
-      const normalizedPanY = clampSectionPan(nextPanY);
-      const currentPanX = clampSectionPan(anchor.backgroundPanX);
-      const currentPanY = clampSectionPan(anchor.backgroundPanY);
-      if (
-        Math.abs(normalizedPanX - currentPanX) < 0.0001
-        && Math.abs(normalizedPanY - currentPanY) < 0.0001
-      ) {
-        return false;
-      }
-      anchor.backgroundPanX = normalizedPanX;
-      anchor.backgroundPanY = normalizedPanY;
-      return true;
-    }
-
-    function commitSectionZoomChange(): void {
-      if (!sectionZoomDragActive) return;
-      sectionZoomDragActive = false;
-      scheduleProjectSave();
-    }
-
-    // ===== PiP drag-to-reposition =====
-
-    function canvasToEditorCoords(clientX: number, clientY: number): { x: number; y: number } {
-      const rect = editorCanvas.getBoundingClientRect();
-      const scaleX = CANVAS_W / rect.width;
-      const scaleY = CANVAS_H / rect.height;
-      return {
-        x: (clientX - rect.left) * scaleX,
-        y: (clientY - rect.top) * scaleY
-      };
-    }
-
-    let draggingOverlay = false;
-    let overlayDragMoved = false;
-    let overlayDragStartX = 0;
-    let overlayDragStartY = 0;
-    let overlayDragOrigX = 0;
-    let overlayDragOrigY = 0;
-    let resizingOverlay = false;
-    let overlayResizeCorner: string | null = null;
-    let overlayResizeStartX = 0;
-    let overlayResizeOrigRect: OverlayPosition | null = null;
-    let overlayResizeAspect = 1;
-
-    editorCanvas.addEventListener('mousedown', (e: MouseEvent) => {
-      if (!editorState || editorState.rendering) return;
-      const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
-      const kf = getStateAtTime(editorState.currentTime);
-      const isReel = editorState.outputMode === 'reel';
-      const mousedownContentW = isReel ? getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode) : CANVAS_W;
-      const cropOffsetX = isReel ? reelCropXToPixelOffset(kf.reelCropX, kf.backgroundZoom, mousedownContentW) : 0;
-
-      if (editorState.selectedOverlayId) {
-        let overlayS: OverlayState | null = null;
-        for (let t = 3; t >= 0; t--) {
-          const s = getOverlayStateAtTime(editorState.currentTime, t);
-          if (s.active && s.overlayId === editorState.selectedOverlayId) { overlayS = s; break; }
-        }
-        if (overlayS && overlayS.active) {
-          const oX = overlayS.x;
-          const oY = overlayS.y;
-          const oW = overlayS.width;
-          const oH = overlayS.height;
-          const CORNER_HIT = 40;
-
-          const corners = [
-            { name: 'tl', x0: oX, y0: oY, x1: oX + CORNER_HIT, y1: oY + CORNER_HIT },
-            { name: 'tr', x0: oX + oW - CORNER_HIT, y0: oY, x1: oX + oW, y1: oY + CORNER_HIT },
-            { name: 'bl', x0: oX, y0: oY + oH - CORNER_HIT, x1: oX + CORNER_HIT, y1: oY + oH },
-            { name: 'br', x0: oX + oW - CORNER_HIT, y0: oY + oH - CORNER_HIT, x1: oX + oW, y1: oY + oH }
-          ];
-          for (const c of corners) {
-            if (x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) {
-              resizingOverlay = true;
-              overlayResizeCorner = c.name;
-              overlayResizeStartX = x;
-              const mode: 'reel' | 'landscape' = isReel ? 'reel' : 'landscape';
-              const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-              if (overlay) {
-                overlayResizeOrigRect = { ...overlay[mode] };
-                overlayResizeAspect = overlayResizeOrigRect.width / Math.max(1, overlayResizeOrigRect.height);
-              }
-              overlayDragMoved = false;
-              pushUndo();
-              e.preventDefault();
-              return;
-            }
-          }
-
-          if (x >= oX && x <= oX + oW && y >= oY && y <= oY + oH) {
-            draggingOverlay = true;
-            overlayDragMoved = false;
-            overlayDragStartX = x;
-            overlayDragStartY = y;
-            const mode: 'reel' | 'landscape' = isReel ? 'reel' : 'landscape';
-            const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-            if (overlay) {
-              overlayDragOrigX = overlay[mode].x;
-              overlayDragOrigY = overlay[mode].y;
-            }
-            pushUndo();
-            e.preventDefault();
-            return;
-          }
-        }
-      }
-
-      if (editorState.hasCamera && kf.pipVisible && kf.camTransition <= 0) {
-        const hitEffW = isReel ? REEL_CANVAS_W : CANVAS_W;
-        const pipW = computePipSize(kf.pipScale, hitEffW);
-        const pipH = pipW;
-        const drawPipX = isReel ? kf.pipX + cropOffsetX : kf.pipX;
-        if (x >= drawPipX && x <= drawPipX + pipW && y >= kf.pipY && y <= kf.pipY + pipH) {
-          pipDragMoved = false;
-          pushUndo();
-          draggingPip = true;
-          e.preventDefault();
-          return;
-        }
-      }
-
-      // GROUP 6.4: Canvas background click deselects overlay
-      if (editorState.selectedOverlayId) {
-        editorState.selectedOverlayId = null;
-        renderOverlayMarkers();
-      }
-
-      const activeSection = findSectionForTime(editorState.currentTime);
-      if (activeSection) selectEditorSection(activeSection.id);
-
-      if (isReel && activeSection) {
-        const cropLeft = cropOffsetX;
-        const cropRight = cropOffsetX + REEL_CANVAS_W;
-        if (x >= cropLeft && x <= cropRight && y >= 0 && y <= CANVAS_H) {
-          cropDragMoved = false;
-          pushUndo();
-          draggingCrop = true;
-          const anchor = getSectionAnchorKeyframe(activeSection.id, true);
-          cropDragState = {
-            sectionId: activeSection.id,
-            startMouseX: x,
-            startCropX: anchor ? clampReelCropX(anchor.reelCropX) : 0,
-            zoom: kf.backgroundZoom || 1
-          };
-          e.preventDefault();
-          return;
-        }
-      }
-
-      if (!activeSection || kf.backgroundZoom <= 1.0001 || (kf.cameraFullscreen && kf.opacity > 0)) return;
-      if (kf.autoTrack) return;
-      const initialPan = getSectionBackgroundPan(activeSection.id);
-      pushUndo();
-      backgroundDragMoved = false;
-      draggingBackground = true;
-      backgroundDragState = {
-        sectionId: activeSection.id,
-        startMouseX: x,
-        startMouseY: y,
-        startPanX: initialPan.x,
-        startPanY: initialPan.y,
-        zoom: kf.backgroundZoom
-      };
-      e.preventDefault();
-    });
-
-    window.addEventListener('mousemove', (e: MouseEvent) => {
-      if (draggingOverlay && editorState && editorState.selectedOverlayId) {
-        const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
-        const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
-        const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-        if (overlay) {
-          overlay[mode].x = overlayDragOrigX + (x - overlayDragStartX);
-          overlay[mode].y = overlayDragOrigY + (y - overlayDragStartY);
-          overlayDragMoved = true;
-        }
-        return;
-      }
-
-      if (resizingOverlay && editorState && editorState.selectedOverlayId && overlayResizeOrigRect) {
-        const { x } = canvasToEditorCoords(e.clientX, e.clientY);
-        const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
-        const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-        if (overlay) {
-          const orig = overlayResizeOrigRect;
-          const aspect = overlayResizeAspect;
-          let newW: number, newH: number, newX: number, newY: number;
-
-          if (overlayResizeCorner === 'br') {
-            newW = Math.max(50, orig.width + (x - overlayResizeStartX));
-            newH = newW / aspect;
-            newX = orig.x;
-            newY = orig.y;
-          } else if (overlayResizeCorner === 'bl') {
-            newW = Math.max(50, orig.width - (x - overlayResizeStartX));
-            newH = newW / aspect;
-            newX = orig.x + orig.width - newW;
-            newY = orig.y;
-          } else if (overlayResizeCorner === 'tr') {
-            newW = Math.max(50, orig.width + (x - overlayResizeStartX));
-            newH = newW / aspect;
-            newX = orig.x;
-            newY = orig.y + orig.height - newH;
-          } else { // tl
-            newW = Math.max(50, orig.width - (x - overlayResizeStartX));
-            newH = newW / aspect;
-            newX = orig.x + orig.width - newW;
-            newY = orig.y + orig.height - newH;
-          }
-
-          overlay[mode].x = Math.round(newX);
-          overlay[mode].y = Math.round(newY);
-          overlay[mode].width = Math.round(newW);
-          overlay[mode].height = Math.round(Math.max(50 / aspect, newH));
-          overlayDragMoved = true;
-          updateOverlaySizeControl();
-        }
-        return;
-      }
-
-      if (draggingCrop && editorState && cropDragState) {
-        const { x } = canvasToEditorCoords(e.clientX, e.clientY);
-        const deltaX = x - cropDragState.startMouseX;
-        const zoom = cropDragState.zoom || 1;
-        const dragContentW = getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode);
-        const scaledW = dragContentW * Math.min(1, zoom);
-        const maxCropRange = Math.max(0, scaledW - REEL_CANVAS_W);
-        const deltaCropX = maxCropRange > 0 ? (deltaX / maxCropRange) * 2 : 0;
-        const newCropX = clampReelCropX(cropDragState.startCropX + deltaCropX);
-        const anchor = getSectionAnchorKeyframe(cropDragState.sectionId, true);
-        if (anchor && Math.abs(clampReelCropX(anchor.reelCropX) - newCropX) > 0.001) {
-          anchor.reelCropX = newCropX;
-          cropDragMoved = true;
-        }
-        return;
-      }
-
-      if (draggingBackground && editorState && backgroundDragState) {
-        const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
-        const deltaX = x - backgroundDragState.startMouseX;
-        const deltaY = y - backgroundDragState.startMouseY;
-        const { maxOffsetX, maxOffsetY } = getZoomCropBounds(backgroundDragState.zoom);
-        const nextPanX = maxOffsetX > 0
-          ? backgroundDragState.startPanX - (deltaX / maxOffsetX)
-          : 0;
-        const nextPanY = maxOffsetY > 0
-          ? backgroundDragState.startPanY - (deltaY / maxOffsetY)
-          : 0;
-        backgroundDragMoved = setSectionBackgroundPan(backgroundDragState.sectionId, nextPanX, nextPanY) || backgroundDragMoved;
-        return;
-      }
-
-      if (!draggingPip || !editorState) return;
-      pipDragMoved = true;
-      const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
-      const isReel = editorState.outputMode === 'reel';
-      const { w, h } = getEffectiveCanvasDimensions();
-      const currentState = getStateAtTime(editorState.currentTime);
-      const snapContentW = isReel ? getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode) : CANVAS_W;
-      const snapX = isReel ? x - reelCropXToPixelOffset(currentState.reelCropX, currentState.backgroundZoom, snapContentW) : x;
-      const dragPipSize = computePipSize(currentState.pipScale, w);
-      const snapped = snapToNearest(snapX, y, w, h, dragPipSize);
-
-      const selectedSection = getSelectedSection();
-      const section = selectedSection || findSectionForTime(editorState.currentTime);
-      if (section) {
-        const anchor = getSectionAnchorKeyframe(section.id, true);
-        if (anchor) {
-          anchor.pipX = snapped.x;
-          anchor.pipY = snapped.y;
-          anchor.pipSnapPoint = snapped.snapPoint as PipSnapPoint;
-        }
-      }
-    });
-
-    window.addEventListener('mouseup', () => {
-      if (draggingOverlay || resizingOverlay) {
-        const wasDragging = draggingOverlay || resizingOverlay;
-        draggingOverlay = false;
-        resizingOverlay = false;
-        overlayResizeCorner = null;
-        overlayResizeOrigRect = null;
-        editorCanvas.style.cursor = '';
-        if (wasDragging) {
-          if (overlayDragMoved) {
-            scheduleProjectSave();
-          } else {
-            undoStack.pop();
-            updateUndoRedoButtons();
-          }
-          overlayDragMoved = false;
-        }
-      }
-
-      const wasDraggingCrop = draggingCrop;
-      draggingCrop = false;
-      cropDragState = null;
-      if (wasDraggingCrop) {
-        if (cropDragMoved) {
-          scheduleProjectSave();
-        } else {
-          undoStack.pop();
-          updateUndoRedoButtons();
-        }
-        cropDragMoved = false;
-      }
-
-      const wasDraggingBackground = draggingBackground;
-      draggingBackground = false;
-      backgroundDragState = null;
-      if (wasDraggingBackground) {
-        if (backgroundDragMoved) {
-          scheduleProjectSave();
-        } else {
-          undoStack.pop();
-          updateUndoRedoButtons();
-        }
-        backgroundDragMoved = false;
-      }
-
-      const wasDragging = draggingPip;
-      draggingPip = false;
-      if (wasDragging) {
-        if (pipDragMoved) {
-          scheduleProjectSave();
-        } else {
-          undoStack.pop();
-          updateUndoRedoButtons();
-        }
-        pipDragMoved = false;
-      }
-    });
-
-    // ===== Overlay cursor style on hover =====
-    editorCanvas.addEventListener('mousemove', (e: MouseEvent) => {
-      if (!editorState || editorState.rendering || draggingOverlay || resizingOverlay || draggingPip) return;
-      if (!editorState.selectedOverlayId) {
-        if (editorCanvas.style.cursor === 'nwse-resize' || editorCanvas.style.cursor === 'nesw-resize' || editorCanvas.style.cursor === 'move') {
-          editorCanvas.style.cursor = '';
-        }
-        return;
-      }
-      let overlayS: OverlayState | null = null;
-      for (let t = 1; t >= 0; t--) {
-        const s = getOverlayStateAtTime(editorState.currentTime, t);
-        if (s.active && s.overlayId === editorState.selectedOverlayId) { overlayS = s; break; }
-      }
-      if (!overlayS || !overlayS.active) {
-        editorCanvas.style.cursor = '';
-        return;
-      }
-      const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
-      const isReel = editorState.outputMode === 'reel';
-      const kf = getStateAtTime(editorState.currentTime);
-      const hoverContentW = isReel ? getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode) : CANVAS_W;
-      const hoverCropX = isReel ? reelCropXToPixelOffset(kf.reelCropX, kf.backgroundZoom, hoverContentW) : 0;
-      const oX = overlayS.x + (isReel ? hoverCropX : 0);
+    if (overlayS && overlayS.active) {
+      const oX = overlayS.x;
       const oY = overlayS.y;
       const oW = overlayS.width;
       const oH = overlayS.height;
-      const CH = 40;
-      const cornerZones = [
-        { cursor: 'nwse-resize', x0: oX, y0: oY, x1: oX + CH, y1: oY + CH },
-        { cursor: 'nesw-resize', x0: oX + oW - CH, y0: oY, x1: oX + oW, y1: oY + CH },
-        { cursor: 'nesw-resize', x0: oX, y0: oY + oH - CH, x1: oX + CH, y1: oY + oH },
-        { cursor: 'nwse-resize', x0: oX + oW - CH, y0: oY + oH - CH, x1: oX + oW, y1: oY + oH }
+      const CORNER_HIT = 40;
+
+      const corners = [
+        { name: 'tl', x0: oX, y0: oY, x1: oX + CORNER_HIT, y1: oY + CORNER_HIT },
+        { name: 'tr', x0: oX + oW - CORNER_HIT, y0: oY, x1: oX + oW, y1: oY + CORNER_HIT },
+        { name: 'bl', x0: oX, y0: oY + oH - CORNER_HIT, x1: oX + CORNER_HIT, y1: oY + oH },
+        { name: 'br', x0: oX + oW - CORNER_HIT, y0: oY + oH - CORNER_HIT, x1: oX + oW, y1: oY + oH }
       ];
-      for (const z of cornerZones) {
-        if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) {
-          editorCanvas.style.cursor = z.cursor;
+      for (const c of corners) {
+        if (x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) {
+          setResizingOverlay(true);
+          setOverlayResizeCorner(c.name);
+          setOverlayResizeStartX(x);
+          const mode: 'reel' | 'landscape' = isReel ? 'reel' : 'landscape';
+          const overlay = editorState.overlays.find((o) => o.id === editorState!.selectedOverlayId);
+          if (overlay) {
+            const origRect = { ...overlay[mode] };
+            setOverlayResizeOrigRect(origRect);
+            setOverlayResizeAspect(origRect.width / Math.max(1, origRect.height));
+          }
+          setOverlayDragMoved(false);
+          pushUndo();
+          e.preventDefault();
           return;
         }
       }
+
       if (x >= oX && x <= oX + oW && y >= oY && y <= oY + oH) {
-        editorCanvas.style.cursor = 'move';
-        return;
-      }
-      editorCanvas.style.cursor = '';
-    });
-
-    // ===== Overlay drag-and-drop import =====
-
-    const OVERLAY_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
-    const OVERLAY_VIDEO_EXTS = ['.mp4', '.webm', '.mov'];
-
-    editorCanvas.addEventListener('dragover', (e: DragEvent) => {
-      if (!editorState || editorState.rendering) return;
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DragEvent extended with custom track index property
-    async function handleOverlayDrop(e: any): Promise<void> {
-      e.preventDefault();
-      if (!editorState || editorState.rendering || !activeProjectPath) return;
-      const file = e.dataTransfer?.files?.[0] as File | undefined;
-      if (!file) return;
-      const filePath = window.electronAPI.getFilePathFromDrop(file);
-      if (!filePath) return;
-
-      const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-      const isAudio = AUDIO_OVERLAY_EXTENSIONS.includes(ext as typeof AUDIO_OVERLAY_EXTENSIONS[number]);
-      if (isAudio) {
-        try {
-          const result = await window.electronAPI.importAudioOverlayMedia(activeProjectPath, filePath);
-          if (!result || !result.mediaPath) return;
-          pushUndo();
-          const startTime = editorState.currentTime;
-          const audioDuration = result.duration > 0 ? result.duration : Math.max(5, editorState.duration - startTime);
-          const endTime = Math.min(startTime + audioDuration, editorState.duration);
-          const placedStart = placeAudioOverlayAtTime(startTime, endTime - startTime, editorState.duration, 0);
-          if (placedStart === null) { undoStack.pop(); updateUndoRedoButtons(); return; }
-          const newAo: AudioOverlay = {
-            id: generateAudioOverlayId(),
-            trackIndex: 0,
-            mediaPath: result.mediaPath,
-            startTime: placedStart,
-            endTime: placedStart + (endTime - startTime),
-            sourceStart: 0,
-            sourceEnd: endTime - startTime,
-            volume: 1.0,
-            saved: false
-          };
-          editorState.audioOverlays.push(newAo);
-          editorState.audioOverlays.sort((a, b) => a.startTime - b.startTime);
-          editorState.selectedAudioOverlayId = newAo.id;
-          renderAudioOverlayMarkers();
-          scheduleProjectSave();
-        } catch (err) {
-          console.error('Failed to import audio overlay media:', err);
+        setDraggingOverlay(true);
+        setOverlayDragMoved(false);
+        setOverlayDragStartX(x);
+        setOverlayDragStartY(y);
+        const mode: 'reel' | 'landscape' = isReel ? 'reel' : 'landscape';
+        const overlay = editorState.overlays.find((o) => o.id === editorState!.selectedOverlayId);
+        if (overlay) {
+          setOverlayDragOrigX(overlay[mode].x);
+          setOverlayDragOrigY(overlay[mode].y);
         }
+        pushUndo();
+        e.preventDefault();
         return;
       }
+    }
+  }
 
-      const isImage = OVERLAY_IMAGE_EXTS.includes(ext);
-      const isVideo = OVERLAY_VIDEO_EXTS.includes(ext);
-      if (!isImage && !isVideo) return;
+  if (editorState.hasCamera && kf.pipVisible && kf.camTransition <= 0) {
+    const hitEffW = isReel ? REEL_CANVAS_W : CANVAS_W;
+    const pipW = computePipSize(kf.pipScale, hitEffW);
+    const pipH = pipW;
+    const drawPipX = isReel ? kf.pipX + cropOffsetX : kf.pipX;
+    if (x >= drawPipX && x <= drawPipX + pipW && y >= kf.pipY && y <= kf.pipY + pipH) {
+      setPipDragMoved(false);
+      pushUndo();
+      setDraggingPip(true);
+      e.preventDefault();
+      return;
+    }
+  }
 
-      try {
-        const mediaPath = await window.electronAPI.importOverlayMedia(activeProjectPath, filePath);
-        const mediaType = isImage ? 'image' : 'video';
+  // GROUP 6.4: Canvas background click deselects overlay
+  if (editorState.selectedOverlayId) {
+    editorState.selectedOverlayId = null;
+    renderOverlayMarkers();
+  }
 
-        const effectiveW = editorState.outputMode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
-        const defaultW = Math.round(effectiveW * (editorState.outputMode === 'reel' ? 0.7 : 0.4));
-        let defaultH = Math.round(defaultW * 3 / 4);
+  const activeSection = findSectionForTime(editorState.currentTime);
+  if (activeSection) selectEditorSection(activeSection.id);
 
-        try {
-          if (isImage) {
-            const dims = await new Promise<{ w: number; h: number } | null>((resolve) => {
-              const img = new Image();
-              img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-              img.onerror = () => resolve(null);
-              img.src = `file://${activeProjectPath}/${mediaPath}`;
-            });
-            if (dims) {
-              defaultH = Math.round(defaultW * dims.h / dims.w);
-            }
-          } else if (isVideo) {
-            const dims = await new Promise<{ w: number; h: number } | null>((resolve) => {
-              const vid = document.createElement('video');
-              vid.preload = 'metadata';
-              vid.onloadedmetadata = () => resolve({ w: vid.videoWidth, h: vid.videoHeight });
-              vid.onerror = () => resolve(null);
-              vid.src = `file://${activeProjectPath}/${mediaPath}`;
-            });
-            if (dims && dims.w > 0) {
-              defaultH = Math.round(defaultW * dims.h / dims.w);
-            }
+  if (isReel && activeSection) {
+    const cropLeft = cropOffsetX;
+    const cropRight = cropOffsetX + REEL_CANVAS_W;
+    if (x >= cropLeft && x <= cropRight && y >= 0 && y <= CANVAS_H) {
+      setCropDragMoved(false);
+      pushUndo();
+      setDraggingCrop(true);
+      const anchor = getSectionAnchorKeyframe(activeSection.id, true);
+      setCropDragState({
+        sectionId: activeSection.id,
+        startMouseX: x,
+        startCropX: anchor ? clampReelCropX(anchor.reelCropX) : 0,
+        zoom: kf.backgroundZoom || 1
+      });
+      e.preventDefault();
+      return;
+    }
+  }
+
+  if (!activeSection || kf.backgroundZoom <= 1.0001 || (kf.cameraFullscreen && kf.opacity > 0))
+    return;
+  if (kf.autoTrack) return;
+  const initialPan = getSectionBackgroundPan(activeSection.id);
+  pushUndo();
+  setBackgroundDragMoved(false);
+  setDraggingBackground(true);
+  setBackgroundDragState({
+    sectionId: activeSection.id,
+    startMouseX: x,
+    startMouseY: y,
+    startPanX: initialPan.x,
+    startPanY: initialPan.y,
+    zoom: kf.backgroundZoom
+  });
+  e.preventDefault();
+});
+
+window.addEventListener('mousemove', (e: MouseEvent) => {
+  if (draggingOverlay && editorState && editorState.selectedOverlayId) {
+    const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
+    const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
+    const overlay = editorState.overlays.find((o) => o.id === editorState!.selectedOverlayId);
+    if (overlay) {
+      overlay[mode].x = overlayDragOrigX + (x - overlayDragStartX);
+      overlay[mode].y = overlayDragOrigY + (y - overlayDragStartY);
+      setOverlayDragMoved(true);
+    }
+    return;
+  }
+
+  if (resizingOverlay && editorState && editorState.selectedOverlayId && overlayResizeOrigRect) {
+    const { x } = canvasToEditorCoords(e.clientX, e.clientY);
+    const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
+    const overlay = editorState.overlays.find((o) => o.id === editorState!.selectedOverlayId);
+    if (overlay) {
+      const orig = overlayResizeOrigRect;
+      const aspect = overlayResizeAspect;
+      let newW: number, newH: number, newX: number, newY: number;
+
+      if (overlayResizeCorner === 'br') {
+        newW = Math.max(50, orig.width + (x - overlayResizeStartX));
+        newH = newW / aspect;
+        newX = orig.x;
+        newY = orig.y;
+      } else if (overlayResizeCorner === 'bl') {
+        newW = Math.max(50, orig.width - (x - overlayResizeStartX));
+        newH = newW / aspect;
+        newX = orig.x + orig.width - newW;
+        newY = orig.y;
+      } else if (overlayResizeCorner === 'tr') {
+        newW = Math.max(50, orig.width + (x - overlayResizeStartX));
+        newH = newW / aspect;
+        newX = orig.x;
+        newY = orig.y + orig.height - newH;
+      } else {
+        // tl
+        newW = Math.max(50, orig.width - (x - overlayResizeStartX));
+        newH = newW / aspect;
+        newX = orig.x + orig.width - newW;
+        newY = orig.y + orig.height - newH;
+      }
+
+      overlay[mode].x = Math.round(newX);
+      overlay[mode].y = Math.round(newY);
+      overlay[mode].width = Math.round(newW);
+      overlay[mode].height = Math.round(Math.max(50 / aspect, newH));
+      setOverlayDragMoved(true);
+      updateOverlaySizeControl();
+    }
+    return;
+  }
+
+  if (draggingCrop && editorState && cropDragState) {
+    const { x } = canvasToEditorCoords(e.clientX, e.clientY);
+    const deltaX = x - cropDragState.startMouseX;
+    const zoom = cropDragState.zoom || 1;
+    const dragContentW = getContentWidth(
+      editorState.sourceWidth,
+      editorState.sourceHeight,
+      editorState.screenFitMode as 'fit' | 'fill',
+      CANVAS_W,
+      CANVAS_H
+    );
+    const scaledW = dragContentW * Math.min(1, zoom);
+    const maxCropRange = Math.max(0, scaledW - REEL_CANVAS_W);
+    const deltaCropX = maxCropRange > 0 ? (deltaX / maxCropRange) * 2 : 0;
+    const newCropX = clampReelCropX(cropDragState.startCropX + deltaCropX);
+    const anchor = getSectionAnchorKeyframe(cropDragState.sectionId, true);
+    if (anchor && Math.abs(clampReelCropX(anchor.reelCropX) - newCropX) > 0.001) {
+      anchor.reelCropX = newCropX;
+      setCropDragMoved(true);
+    }
+    return;
+  }
+
+  if (draggingBackground && editorState && backgroundDragState) {
+    const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
+    const deltaX = x - backgroundDragState.startMouseX;
+    const deltaY = y - backgroundDragState.startMouseY;
+    const { maxOffsetX, maxOffsetY } = getZoomCropBounds(backgroundDragState.zoom);
+    const nextPanX = maxOffsetX > 0 ? backgroundDragState.startPanX - deltaX / maxOffsetX : 0;
+    const nextPanY = maxOffsetY > 0 ? backgroundDragState.startPanY - deltaY / maxOffsetY : 0;
+    setBackgroundDragMoved(
+      setSectionBackgroundPan(backgroundDragState.sectionId, nextPanX, nextPanY) ||
+        backgroundDragMoved
+    );
+    return;
+  }
+
+  if (!draggingPip || !editorState) return;
+  setPipDragMoved(true);
+  const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
+  const isReel = editorState.outputMode === 'reel';
+  const { w, h } = getEffectiveCanvasDimensions();
+  const currentState = getStateAtTime(editorState.currentTime);
+  const snapContentW = isReel
+    ? getContentWidth(
+        editorState.sourceWidth,
+        editorState.sourceHeight,
+        editorState.screenFitMode as 'fit' | 'fill',
+        CANVAS_W,
+        CANVAS_H
+      )
+    : CANVAS_W;
+  const snapX = isReel
+    ? x - reelCropXToPixelOffset(currentState.reelCropX, currentState.backgroundZoom, snapContentW)
+    : x;
+  const dragPipSize = computePipSize(currentState.pipScale, w);
+  const snapped = snapToNearest(snapX, y, w, h, dragPipSize);
+
+  const selectedSection = getSelectedSection();
+  const section = selectedSection || findSectionForTime(editorState.currentTime);
+  if (section) {
+    const anchor = getSectionAnchorKeyframe(section.id, true);
+    if (anchor) {
+      anchor.pipX = snapped.x;
+      anchor.pipY = snapped.y;
+      anchor.pipSnapPoint = snapped.snapPoint as PipSnapPoint;
+    }
+  }
+});
+
+window.addEventListener('mouseup', () => {
+  if (draggingOverlay || resizingOverlay) {
+    const wasDragging = draggingOverlay || resizingOverlay;
+    setDraggingOverlay(false);
+    setResizingOverlay(false);
+    setOverlayResizeCorner(null);
+    setOverlayResizeOrigRect(null);
+    editorCanvas.style.cursor = '';
+    if (wasDragging) {
+      if (overlayDragMoved) {
+        scheduleProjectSave();
+      } else {
+        undoStack.pop();
+        updateUndoRedoButtons();
+      }
+      setOverlayDragMoved(false);
+    }
+  }
+
+  const wasDraggingCrop = draggingCrop;
+  setDraggingCrop(false);
+  setCropDragState(null);
+  if (wasDraggingCrop) {
+    if (cropDragMoved) {
+      scheduleProjectSave();
+    } else {
+      undoStack.pop();
+      updateUndoRedoButtons();
+    }
+    setCropDragMoved(false);
+  }
+
+  const wasDraggingBackground = draggingBackground;
+  setDraggingBackground(false);
+  setBackgroundDragState(null);
+  if (wasDraggingBackground) {
+    if (backgroundDragMoved) {
+      scheduleProjectSave();
+    } else {
+      undoStack.pop();
+      updateUndoRedoButtons();
+    }
+    setBackgroundDragMoved(false);
+  }
+
+  const wasDragging = draggingPip;
+  setDraggingPip(false);
+  if (wasDragging) {
+    if (pipDragMoved) {
+      scheduleProjectSave();
+    } else {
+      undoStack.pop();
+      updateUndoRedoButtons();
+    }
+    setPipDragMoved(false);
+  }
+});
+
+// ===== Overlay cursor style on hover =====
+editorCanvas.addEventListener('mousemove', (e: MouseEvent) => {
+  if (!editorState || editorState.rendering || draggingOverlay || resizingOverlay || draggingPip)
+    return;
+  if (!editorState.selectedOverlayId) {
+    if (
+      editorCanvas.style.cursor === 'nwse-resize' ||
+      editorCanvas.style.cursor === 'nesw-resize' ||
+      editorCanvas.style.cursor === 'move'
+    ) {
+      editorCanvas.style.cursor = '';
+    }
+    return;
+  }
+  let overlayS: OverlayState | null = null;
+  for (let t = 1; t >= 0; t--) {
+    const s = getOverlayStateAtTime(editorState.currentTime, t);
+    if (s.active && s.overlayId === editorState.selectedOverlayId) {
+      overlayS = s;
+      break;
+    }
+  }
+  if (!overlayS || !overlayS.active) {
+    editorCanvas.style.cursor = '';
+    return;
+  }
+  const { x, y } = canvasToEditorCoords(e.clientX, e.clientY);
+  const isReel = editorState.outputMode === 'reel';
+  const kf = getStateAtTime(editorState.currentTime);
+  const hoverContentW = isReel
+    ? getContentWidth(
+        editorState.sourceWidth,
+        editorState.sourceHeight,
+        editorState.screenFitMode as 'fit' | 'fill',
+        CANVAS_W,
+        CANVAS_H
+      )
+    : CANVAS_W;
+  const hoverCropX = isReel
+    ? reelCropXToPixelOffset(kf.reelCropX, kf.backgroundZoom, hoverContentW)
+    : 0;
+  const oX = overlayS.x + (isReel ? hoverCropX : 0);
+  const oY = overlayS.y;
+  const oW = overlayS.width;
+  const oH = overlayS.height;
+  const CH = 40;
+  const cornerZones = [
+    { cursor: 'nwse-resize', x0: oX, y0: oY, x1: oX + CH, y1: oY + CH },
+    { cursor: 'nesw-resize', x0: oX + oW - CH, y0: oY, x1: oX + oW, y1: oY + CH },
+    { cursor: 'nesw-resize', x0: oX, y0: oY + oH - CH, x1: oX + CH, y1: oY + oH },
+    { cursor: 'nwse-resize', x0: oX + oW - CH, y0: oY + oH - CH, x1: oX + oW, y1: oY + oH }
+  ];
+  for (const z of cornerZones) {
+    if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) {
+      editorCanvas.style.cursor = z.cursor;
+      return;
+    }
+  }
+  if (x >= oX && x <= oX + oW && y >= oY && y <= oY + oH) {
+    editorCanvas.style.cursor = 'move';
+    return;
+  }
+  editorCanvas.style.cursor = '';
+});
+
+// ===== Overlay drag-and-drop import =====
+
+editorCanvas.addEventListener('dragover', (e: DragEvent) => {
+  if (!editorState || editorState.rendering) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+
+editorCanvas.addEventListener('drop', handleOverlayDrop);
+
+// ===== Overlay track drop targets =====
+for (let _trackIdx = 0; _trackIdx < 4; _trackIdx++) {
+  const trackEl = overlayTrackEls[_trackIdx]!;
+  const trackIdx = _trackIdx;
+  trackEl.addEventListener('dragover', (e: DragEvent) => {
+    if (!editorState || editorState.rendering) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  trackEl.addEventListener('drop', (e: DragEvent) => {
+    e.preventDefault();
+    // Tracks 0-1 are window-only, reject user media drops on them
+    if (trackIdx < 2) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- attach track index for shared handler
+    (e as any)._overlayDropTrackIndex = trackIdx;
+    handleOverlayDrop(e);
+  });
+}
+
+// ===== Timeline scrubber =====
+
+editorTimeline.addEventListener('mousedown', (e: MouseEvent) => {
+  if (!editorState || editorState.rendering) return;
+
+  const target = e.target as HTMLElement;
+  const overlayTrimEdge = target?.dataset?.overlayTrimEdge;
+  if (overlayTrimEdge) {
+    const overlayId = target.dataset.overlayId;
+    if (overlayId) {
+      startOverlayTrimDrag(e, overlayId, overlayTrimEdge);
+      return;
+    }
+  }
+
+  const overlayId = target?.dataset?.overlayId || target?.parentElement?.dataset?.overlayId;
+  if (overlayId) {
+    selectOverlay(overlayId);
+    const overlay = editorState.overlays.find((o) => o.id === overlayId);
+    if (overlay) {
+      let overlayMoveDragStarted = false;
+      const overlayMoveDuration = overlay.endTime - overlay.startTime;
+      const overlayMoveOrigStart = overlay.startTime;
+      const overlayMoveOrigTrack = overlay.trackIndex || 0;
+      let dragGhostEl: HTMLDivElement | null = null;
+      let lastDragTargetTime = overlay.startTime;
+      let lastDragTargetTrack = overlayMoveOrigTrack;
+      let currentGhostParent: HTMLElement | null = null;
+      pushUndo();
+
+      const onMoveOverlay = (e2: MouseEvent) => {
+        overlayMoveDragStarted = true;
+        const rect = editorTimeline.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e2.clientX - rect.left) / rect.width));
+        lastDragTargetTime = Math.max(
+          0,
+          Math.min(
+            editorState!.duration - overlayMoveDuration,
+            pct * editorState!.duration - overlayMoveDuration / 2
+          )
+        );
+
+        // Determine target track from mouse Y, locked to same type range
+        // Window overlays (tracks 0-1) can only move within 0-1
+        // Media overlays (tracks 2-3) can only move within 2-3
+        const isWindowOverlay = overlay.mediaType === 'window';
+        const minTrack = isWindowOverlay ? 0 : 2;
+        const maxTrack = isWindowOverlay ? 1 : 3;
+        for (let ti = minTrack; ti <= maxTrack; ti++) {
+          const trackRect = overlayTrackEls[ti]!.getBoundingClientRect();
+          if (e2.clientY >= trackRect.top && e2.clientY <= trackRect.bottom) {
+            lastDragTargetTrack = ti;
+            break;
           }
-        } catch (_) { /* use default aspect */ }
+        }
 
-        const landscapeW = Math.round(CANVAS_W * 0.4);
-        const reelW = Math.round(REEL_CANVAS_W * 0.7);
-        const aspectH = (w: number) => Math.round(w * (defaultH / defaultW));
+        const targetTrackEl =
+          overlayTrackEls[Math.min(lastDragTargetTrack, 3)] || overlayTrackEls[0]!;
 
-        const duration = isVideo ? 5 : 3;
-        const sourceStart = 0;
+        if (!dragGhostEl) {
+          dragGhostEl = document.createElement('div');
+          dragGhostEl.style.cssText =
+            'position:absolute;top:0;bottom:0;z-index:40;border-radius:3px;pointer-events:none;';
+          dragGhostEl.style.backgroundColor = 'rgba(79,70,229,0.6)';
+          dragGhostEl.style.boxShadow = '0 0 8px rgba(99,102,241,0.5)';
+          targetTrackEl.appendChild(dragGhostEl);
+          currentGhostParent = targetTrackEl;
+          const origTrackEl =
+            overlayTrackEls[Math.min(overlayMoveOrigTrack, 3)] || overlayTrackEls[0]!;
+          const origBand = origTrackEl.querySelector(
+            `[data-overlay-id="${overlayId}"]`
+          ) as HTMLElement | null;
+          if (origBand) origBand.style.opacity = '0.25';
+        }
 
-        // Media overlays go to tracks 2-3 (not window tracks 0-1)
-        const rawDropTrack: number = e._overlayDropTrackIndex ?? 2;
-        const dropTrackIndex = rawDropTrack < 2 ? 2 : rawDropTrack;
+        if (currentGhostParent !== targetTrackEl) {
+          targetTrackEl.appendChild(dragGhostEl);
+          currentGhostParent = targetTrackEl;
+        }
 
-        pushUndo();
-        const placedStart = placeOverlayAtTime(null, editorState.currentTime, duration, editorState.duration, dropTrackIndex);
-        if (placedStart === null) {
+        const ghostLeft = (lastDragTargetTime / editorState!.duration) * 100;
+        const ghostWidth = (overlayMoveDuration / editorState!.duration) * 100;
+        dragGhostEl.style.left = ghostLeft + '%';
+        dragGhostEl.style.width = ghostWidth + '%';
+      };
+      const onUpOverlay = () => {
+        window.removeEventListener('mousemove', onMoveOverlay);
+        window.removeEventListener('mouseup', onUpOverlay);
+        if (dragGhostEl) {
+          dragGhostEl.remove();
+          dragGhostEl = null;
+        }
+        if (overlayMoveDragStarted) {
+          overlay.startTime = overlayMoveOrigStart;
+          overlay.endTime = overlayMoveOrigStart + overlayMoveDuration;
+          overlay.trackIndex = lastDragTargetTrack;
+          const placed = placeOverlayAtTime(
+            overlayId,
+            lastDragTargetTime,
+            overlayMoveDuration,
+            editorState!.duration,
+            lastDragTargetTrack
+          );
+          if (placed !== null) {
+            overlay.startTime = placed;
+            overlay.endTime = placed + overlayMoveDuration;
+          }
+          editorState!.overlays.sort(
+            (a, b) => (a.trackIndex || 0) - (b.trackIndex || 0) || a.startTime - b.startTime
+          );
+          renderOverlayMarkers();
+          scheduleProjectSave();
+        } else {
           undoStack.pop();
           updateUndoRedoButtons();
-          return;
         }
-        const startTime = placedStart;
-        const endTime = startTime + duration;
-        const sourceEnd = endTime - startTime;
-
-        const overlay: Overlay = {
-          id: generateOverlayId(),
-          trackIndex: dropTrackIndex,
-          mediaPath,
-          mediaType: mediaType as 'image' | 'video',
-          startTime,
-          endTime,
-          sourceStart,
-          sourceEnd,
-          landscape: { x: Math.round((CANVAS_W - landscapeW) / 2), y: Math.round((CANVAS_H - aspectH(landscapeW)) / 2), width: landscapeW, height: aspectH(landscapeW) },
-          reel: { x: Math.round((REEL_CANVAS_W - reelW) / 2), y: Math.round((REEL_CANVAS_H - aspectH(reelW)) / 2), width: reelW, height: aspectH(reelW) },
-          saved: false
-        };
-        editorState.overlays.push(overlay);
-        editorState.overlays.sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0) || a.startTime - b.startTime);
-        editorState.selectedOverlayId = overlay.id;
-        renderOverlayMarkers();
-        scheduleProjectSave();
-      } catch (err) {
-        console.error('Failed to import overlay media:', err);
-      }
+      };
+      window.addEventListener('mousemove', onMoveOverlay);
+      window.addEventListener('mouseup', onUpOverlay);
     }
+    return;
+  }
 
-    editorCanvas.addEventListener('drop', handleOverlayDrop);
-
-    // ===== Overlay track drop targets =====
-    for (let _trackIdx = 0; _trackIdx < 4; _trackIdx++) {
-      const trackEl = overlayTrackEls[_trackIdx]!;
-      const trackIdx = _trackIdx;
-      trackEl.addEventListener('dragover', (e: DragEvent) => {
-        if (!editorState || editorState.rendering) return;
-        e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-      });
-      trackEl.addEventListener('drop', (e: DragEvent) => {
-        e.preventDefault();
-        // Tracks 0-1 are window-only, reject user media drops on them
-        if (trackIdx < 2) return;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- attach track index for shared handler
-        (e as any)._overlayDropTrackIndex = trackIdx;
-        handleOverlayDrop(e);
-      });
+  // Audio overlay trim edge
+  const audioOverlayTrimEdge = target?.dataset?.audioOverlayTrimEdge;
+  if (audioOverlayTrimEdge) {
+    const aoTrimId = target.dataset.audioOverlayId;
+    if (aoTrimId) {
+      startAudioOverlayTrimDrag(e, aoTrimId, audioOverlayTrimEdge);
+      return;
     }
+  }
 
-    // ===== Timeline scrubber =====
+  // Audio overlay band drag-to-move
+  const audioOverlayId =
+    target?.dataset?.audioOverlayId || target?.parentElement?.dataset?.audioOverlayId;
+  if (audioOverlayId) {
+    selectAudioOverlay(audioOverlayId);
+    const ao = editorState.audioOverlays.find((o) => o.id === audioOverlayId);
+    if (ao) {
+      let aoMoveDragStarted = false;
+      const aoMoveDuration = ao.endTime - ao.startTime;
+      const aoMoveOrigStart = ao.startTime;
+      let aoDragGhostEl: HTMLDivElement | null = null;
+      let aoLastDragTargetTime = ao.startTime;
+      pushUndo();
 
-    editorTimeline.addEventListener('mousedown', (e: MouseEvent) => {
-      if (!editorState || editorState.rendering) return;
+      const onMoveAo = (e2: MouseEvent) => {
+        aoMoveDragStarted = true;
+        const rect = editorTimeline.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e2.clientX - rect.left) / rect.width));
+        aoLastDragTargetTime = Math.max(
+          0,
+          Math.min(
+            editorState!.duration - aoMoveDuration,
+            pct * editorState!.duration - aoMoveDuration / 2
+          )
+        );
 
-      const target = e.target as HTMLElement;
-      const overlayTrimEdge = target?.dataset?.overlayTrimEdge;
-      if (overlayTrimEdge) {
-        const overlayId = target.dataset.overlayId;
-        if (overlayId) {
-          startOverlayTrimDrag(e, overlayId, overlayTrimEdge);
-          return;
+        if (!aoDragGhostEl && editorAudioTrack0) {
+          aoDragGhostEl = document.createElement('div');
+          aoDragGhostEl.style.cssText =
+            'position:absolute;top:0;bottom:0;z-index:40;border-radius:3px;pointer-events:none;';
+          aoDragGhostEl.style.backgroundColor = 'rgba(20,184,166,0.6)';
+          aoDragGhostEl.style.boxShadow = '0 0 8px rgba(94,234,212,0.5)';
+          editorAudioTrack0.appendChild(aoDragGhostEl);
+          const origBand = editorAudioTrack0.querySelector(
+            `[data-audio-overlay-id="${audioOverlayId}"]`
+          ) as HTMLElement | null;
+          if (origBand) origBand.style.opacity = '0.25';
         }
-      }
 
-      const overlayId = target?.dataset?.overlayId || target?.parentElement?.dataset?.overlayId;
-      if (overlayId) {
-        selectOverlay(overlayId);
-        const overlay = editorState.overlays.find(o => o.id === overlayId);
-        if (overlay) {
-          let overlayMoveDragStarted = false;
-          const overlayMoveDuration = overlay.endTime - overlay.startTime;
-          const overlayMoveOrigStart = overlay.startTime;
-          const overlayMoveOrigTrack = overlay.trackIndex || 0;
-          let dragGhostEl: HTMLDivElement | null = null;
-          let lastDragTargetTime = overlay.startTime;
-          let lastDragTargetTrack = overlayMoveOrigTrack;
-          let currentGhostParent: HTMLElement | null = null;
-          pushUndo();
-
-          const onMoveOverlay = (e2: MouseEvent) => {
-            overlayMoveDragStarted = true;
-            const rect = editorTimeline.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e2.clientX - rect.left) / rect.width));
-            lastDragTargetTime = Math.max(0, Math.min(editorState!.duration - overlayMoveDuration, pct * editorState!.duration - overlayMoveDuration / 2));
-
-            // Determine target track from mouse Y, locked to same type range
-            // Window overlays (tracks 0-1) can only move within 0-1
-            // Media overlays (tracks 2-3) can only move within 2-3
-            const isWindowOverlay = overlay.mediaType === 'window';
-            const minTrack = isWindowOverlay ? 0 : 2;
-            const maxTrack = isWindowOverlay ? 1 : 3;
-            for (let ti = minTrack; ti <= maxTrack; ti++) {
-              const trackRect = overlayTrackEls[ti]!.getBoundingClientRect();
-              if (e2.clientY >= trackRect.top && e2.clientY <= trackRect.bottom) {
-                lastDragTargetTrack = ti;
-                break;
-              }
-            }
-
-            const targetTrackEl = overlayTrackEls[Math.min(lastDragTargetTrack, 3)] || overlayTrackEls[0]!;
-
-            if (!dragGhostEl) {
-              dragGhostEl = document.createElement('div');
-              dragGhostEl.style.cssText = 'position:absolute;top:0;bottom:0;z-index:40;border-radius:3px;pointer-events:none;';
-              dragGhostEl.style.backgroundColor = 'rgba(79,70,229,0.6)';
-              dragGhostEl.style.boxShadow = '0 0 8px rgba(99,102,241,0.5)';
-              targetTrackEl.appendChild(dragGhostEl);
-              currentGhostParent = targetTrackEl;
-              const origTrackEl = overlayTrackEls[Math.min(overlayMoveOrigTrack, 3)] || overlayTrackEls[0]!;
-              const origBand = origTrackEl.querySelector(`[data-overlay-id="${overlayId}"]`) as HTMLElement | null;
-              if (origBand) origBand.style.opacity = '0.25';
-            }
-
-            if (currentGhostParent !== targetTrackEl) {
-              targetTrackEl.appendChild(dragGhostEl);
-              currentGhostParent = targetTrackEl;
-            }
-
-            const ghostLeft = (lastDragTargetTime / editorState!.duration) * 100;
-            const ghostWidth = (overlayMoveDuration / editorState!.duration) * 100;
-            dragGhostEl.style.left = ghostLeft + '%';
-            dragGhostEl.style.width = ghostWidth + '%';
-          };
-          const onUpOverlay = () => {
-            window.removeEventListener('mousemove', onMoveOverlay);
-            window.removeEventListener('mouseup', onUpOverlay);
-            if (dragGhostEl) {
-              dragGhostEl.remove();
-              dragGhostEl = null;
-            }
-            if (overlayMoveDragStarted) {
-              overlay.startTime = overlayMoveOrigStart;
-              overlay.endTime = overlayMoveOrigStart + overlayMoveDuration;
-              overlay.trackIndex = lastDragTargetTrack;
-              const placed = placeOverlayAtTime(overlayId, lastDragTargetTime, overlayMoveDuration, editorState!.duration, lastDragTargetTrack);
-              if (placed !== null) {
-                overlay.startTime = placed;
-                overlay.endTime = placed + overlayMoveDuration;
-              }
-              editorState!.overlays.sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0) || a.startTime - b.startTime);
-              renderOverlayMarkers();
-              scheduleProjectSave();
-            } else {
-              undoStack.pop();
-              updateUndoRedoButtons();
-            }
-          };
-          window.addEventListener('mousemove', onMoveOverlay);
-          window.addEventListener('mouseup', onUpOverlay);
+        if (aoDragGhostEl) {
+          const ghostLeft = (aoLastDragTargetTime / editorState!.duration) * 100;
+          const ghostWidth = (aoMoveDuration / editorState!.duration) * 100;
+          aoDragGhostEl.style.left = ghostLeft + '%';
+          aoDragGhostEl.style.width = ghostWidth + '%';
         }
-        return;
-      }
-
-      // Audio overlay trim edge
-      const audioOverlayTrimEdge = target?.dataset?.audioOverlayTrimEdge;
-      if (audioOverlayTrimEdge) {
-        const aoTrimId = target.dataset.audioOverlayId;
-        if (aoTrimId) {
-          startAudioOverlayTrimDrag(e, aoTrimId, audioOverlayTrimEdge);
-          return;
+      };
+      const onUpAo = () => {
+        window.removeEventListener('mousemove', onMoveAo);
+        window.removeEventListener('mouseup', onUpAo);
+        if (aoDragGhostEl) {
+          aoDragGhostEl.remove();
+          aoDragGhostEl = null;
         }
-      }
-
-      // Audio overlay band drag-to-move
-      const audioOverlayId = target?.dataset?.audioOverlayId || target?.parentElement?.dataset?.audioOverlayId;
-      if (audioOverlayId) {
-        selectAudioOverlay(audioOverlayId);
-        const ao = editorState.audioOverlays.find(o => o.id === audioOverlayId);
-        if (ao) {
-          let aoMoveDragStarted = false;
-          const aoMoveDuration = ao.endTime - ao.startTime;
-          const aoMoveOrigStart = ao.startTime;
-          let aoDragGhostEl: HTMLDivElement | null = null;
-          let aoLastDragTargetTime = ao.startTime;
-          pushUndo();
-
-          const onMoveAo = (e2: MouseEvent) => {
-            aoMoveDragStarted = true;
-            const rect = editorTimeline.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e2.clientX - rect.left) / rect.width));
-            aoLastDragTargetTime = Math.max(0, Math.min(editorState!.duration - aoMoveDuration, pct * editorState!.duration - aoMoveDuration / 2));
-
-            if (!aoDragGhostEl && editorAudioTrack0) {
-              aoDragGhostEl = document.createElement('div');
-              aoDragGhostEl.style.cssText = 'position:absolute;top:0;bottom:0;z-index:40;border-radius:3px;pointer-events:none;';
-              aoDragGhostEl.style.backgroundColor = 'rgba(20,184,166,0.6)';
-              aoDragGhostEl.style.boxShadow = '0 0 8px rgba(94,234,212,0.5)';
-              editorAudioTrack0.appendChild(aoDragGhostEl);
-              const origBand = editorAudioTrack0.querySelector(`[data-audio-overlay-id="${audioOverlayId}"]`) as HTMLElement | null;
-              if (origBand) origBand.style.opacity = '0.25';
-            }
-
-            if (aoDragGhostEl) {
-              const ghostLeft = (aoLastDragTargetTime / editorState!.duration) * 100;
-              const ghostWidth = (aoMoveDuration / editorState!.duration) * 100;
-              aoDragGhostEl.style.left = ghostLeft + '%';
-              aoDragGhostEl.style.width = ghostWidth + '%';
-            }
-          };
-          const onUpAo = () => {
-            window.removeEventListener('mousemove', onMoveAo);
-            window.removeEventListener('mouseup', onUpAo);
-            if (aoDragGhostEl) {
-              aoDragGhostEl.remove();
-              aoDragGhostEl = null;
-            }
-            if (aoMoveDragStarted) {
-              ao.startTime = aoMoveOrigStart;
-              ao.endTime = aoMoveOrigStart + aoMoveDuration;
-              const placed = placeAudioOverlayAtTime(aoLastDragTargetTime, aoMoveDuration, editorState!.duration, ao.trackIndex || 0, audioOverlayId);
-              if (placed !== null) {
-                ao.startTime = placed;
-                ao.endTime = placed + aoMoveDuration;
-              }
-              editorState!.audioOverlays.sort((a, b) => a.startTime - b.startTime);
-              renderAudioOverlayMarkers();
-              scheduleProjectSave();
-            } else {
-              undoStack.pop();
-              updateUndoRedoButtons();
-            }
-          };
-          window.addEventListener('mousemove', onMoveAo);
-          window.addEventListener('mouseup', onUpAo);
-        }
-        return;
-      }
-
-      const trimEdge = target?.dataset?.trimEdge;
-      if (trimEdge) {
-        const trimSectionId = target.dataset.sectionId;
-        if (trimSectionId) {
-          startTrimDrag(e, trimSectionId, trimEdge);
-          return;
-        }
-      }
-
-      const sectionId = target && target.dataset ? target.dataset.sectionId : null;
-      if (sectionId) {
-        selectEditorSection(sectionId);
-        if (editorState.selectedOverlayId) {
-          editorState.selectedOverlayId = null;
-          renderOverlayMarkers();
-        }
-        if (editorState.selectedAudioOverlayId) {
-          editorState.selectedAudioOverlayId = null;
+        if (aoMoveDragStarted) {
+          ao.startTime = aoMoveOrigStart;
+          ao.endTime = aoMoveOrigStart + aoMoveDuration;
+          const placed = placeAudioOverlayAtTime(
+            aoLastDragTargetTime,
+            aoMoveDuration,
+            editorState!.duration,
+            ao.trackIndex || 0,
+            audioOverlayId
+          );
+          if (placed !== null) {
+            ao.startTime = placed;
+            ao.endTime = placed + aoMoveDuration;
+          }
+          editorState!.audioOverlays.sort((a, b) => a.startTime - b.startTime);
           renderAudioOverlayMarkers();
+          scheduleProjectSave();
+        } else {
+          undoStack.pop();
+          updateUndoRedoButtons();
         }
-      }
-      seekFromTimeline(e);
-      const onMove = (e2: MouseEvent) => seekFromTimeline(e2);
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
       };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    });
-
-    function seekFromTimeline(e: MouseEvent): void {
-      const rect = editorTimeline.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      editorSeek(pct * editorState!.duration);
+      window.addEventListener('mousemove', onMoveAo);
+      window.addEventListener('mouseup', onUpAo);
     }
+    return;
+  }
 
-    function applyTimelineZoom(newZoom: number, pivotClientX?: number): void {
-      const wrapper = editorTimelineWrapper;
-      const oldZoom = timelineZoom;
-      newZoom = Math.max(1, Math.min(50, newZoom));
-      if (newZoom === oldZoom) return;
-
-      const rect = wrapper.getBoundingClientRect();
-      const pivotX = (pivotClientX !== undefined ? pivotClientX : rect.left + rect.width / 2);
-      const pivotFraction = (pivotX - rect.left + wrapper.scrollLeft) / (rect.width * oldZoom);
-
-      timelineZoom = newZoom;
-      editorTimeline.style.minWidth = (newZoom * 100) + '%';
-
-      waveformPeaks = computeWaveformPeaksFromCache(Math.round(800 * newZoom));
-      renderWaveform();
-
-      const newContentWidth = rect.width * newZoom;
-      wrapper.scrollLeft = pivotFraction * newContentWidth - (pivotX - rect.left);
+  const trimEdge = target?.dataset?.trimEdge;
+  if (trimEdge) {
+    const trimSectionId = target.dataset.sectionId;
+    if (trimSectionId) {
+      startTrimDrag(e, trimSectionId, trimEdge);
+      return;
     }
+  }
 
-    function scrollTimelineToPlayhead(): void {
-      if (!editorState || editorState.duration <= 0 || timelineZoom <= 1) return;
-      const wrapper = editorTimelineWrapper;
-      const wrapperWidth = wrapper.clientWidth;
-      const contentWidth = wrapperWidth * timelineZoom;
-      const playheadX = (editorState.currentTime / editorState.duration) * contentWidth;
-      const margin = wrapperWidth * 0.2;
-      if (playheadX < wrapper.scrollLeft + margin) {
-        wrapper.scrollLeft = playheadX - margin;
-      } else if (playheadX > wrapper.scrollLeft + wrapperWidth - margin) {
-        wrapper.scrollLeft = playheadX - wrapperWidth + margin;
-      }
+  const sectionId = target && target.dataset ? target.dataset.sectionId : null;
+  if (sectionId) {
+    selectEditorSection(sectionId);
+    if (editorState.selectedOverlayId) {
+      editorState.selectedOverlayId = null;
+      renderOverlayMarkers();
     }
-
-    // ===== Editor button handlers =====
-
-    new ResizeObserver(() => renderWaveform()).observe(editorTimelineWrapper);
-
-    editorTimelineWrapper.addEventListener('wheel', (e: WheelEvent) => {
-      if (!editorState) return;
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        const factor = 1 - e.deltaY * 0.01;
-        applyTimelineZoom(timelineZoom * factor, e.clientX);
-      }
-    }, { passive: false });
-
-    editorUndoBtn.addEventListener('click', editorUndo);
-    editorRedoBtn.addEventListener('click', editorRedo);
-    editorPlayBtn.addEventListener('click', editorTogglePlay);
-    editorSplitBtn.addEventListener('click', () => {
-      if (editorState?.selectedAudioOverlayId) {
-        splitAudioOverlayAtPlayhead();
-      } else if (editorState?.selectedOverlayId) {
-        splitOverlayAtPlayhead();
-      } else {
-        splitSectionAtPlayhead();
-      }
-    });
-    editorToggleCamBtn.addEventListener('click', toggleCameraVisibility);
-    editorCamFullBtn.addEventListener('click', toggleCameraFullscreen);
-    editorApplyFutureBtn.addEventListener('click', applyStyleToFutureSections);
-    editorBgZoomInput.addEventListener('input', () => {
-      if (!editorState || editorState.rendering) return;
-      const changed = setSelectedSectionBackgroundZoom(editorBgZoomInput.value, {
-        pushHistory: !sectionZoomDragActive
-      });
-      if (changed) sectionZoomDragActive = true;
-    });
-    editorBgZoomInput.addEventListener('change', commitSectionZoomChange);
-    editorBgZoomInput.addEventListener('pointerup', commitSectionZoomChange);
-    editorBgZoomInput.addEventListener('blur', commitSectionZoomChange);
-
-    // Scrub drag for Zoom control
-    function initScrubDrag(scrubEl: HTMLElement | null, valueEl: HTMLElement | null, inputEl: HTMLInputElement | null): void {
-      if (!inputEl) return;
-      const scrubTargets = [scrubEl, valueEl].filter(Boolean) as HTMLElement[];
-      for (const target of scrubTargets) {
-        target.addEventListener('mousedown', (e: MouseEvent) => {
-          if (!editorState || editorState.rendering) return;
-          e.preventDefault();
-          const startX = e.clientX;
-          const startVal = parseFloat(inputEl.value);
-          const min = parseFloat(inputEl.min);
-          const max = parseFloat(inputEl.max);
-          const step = parseFloat(inputEl.step) || 0.01;
-          const range = max - min;
-          const sensitivity = range / 200;
-
-          const onMove = (e2: MouseEvent) => {
-            const dx = e2.clientX - startX;
-            const newVal = Math.max(min, Math.min(max, startVal + dx * sensitivity));
-            const stepped = Math.round(newVal / step) * step;
-            inputEl.value = String(stepped);
-            inputEl.dispatchEvent(new Event('input'));
-          };
-          const onUp = () => {
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onUp);
-            document.body.style.cursor = '';
-            inputEl.dispatchEvent(new Event('change'));
-          };
-          document.body.style.cursor = 'ew-resize';
-          window.addEventListener('mousemove', onMove);
-          window.addEventListener('mouseup', onUp);
-        });
-      }
+    if (editorState.selectedAudioOverlayId) {
+      editorState.selectedAudioOverlayId = null;
+      renderAudioOverlayMarkers();
     }
+  }
+  seekFromTimeline(e);
+  const onMove = (e2: MouseEvent) => seekFromTimeline(e2);
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+});
 
-    const editorBgZoomScrub = document.getElementById('editorBgZoomScrub');
-    const editorPipSizeScrub = document.getElementById('editorPipSizeScrub');
-    initScrubDrag(editorBgZoomScrub, editorBgZoomValue, editorBgZoomInput);
-    initScrubDrag(editorPipSizeScrub, editorPipSizeValue, editorPipSizeInput);
-    initScrubDrag(editorOverlaySizeScrub ?? null, editorOverlaySizeValue, editorOverlaySizeInput);
-    initScrubDrag(editorAutoTrackSmoothScrub ?? null, editorAutoTrackSmoothValue ?? null, editorAutoTrackSmoothInput);
+// ===== Editor button handlers =====
 
-    // Click on "Size" label centers the selected overlay (click = < 3px movement)
-    if (editorOverlaySizeScrub) {
-      let sizeClickStartX = 0;
-      editorOverlaySizeScrub.addEventListener('mousedown', (e: MouseEvent) => {
-        sizeClickStartX = e.clientX;
-      });
-      editorOverlaySizeScrub.addEventListener('mouseup', (e: MouseEvent) => {
-        if (Math.abs(e.clientX - sizeClickStartX) < 3) {
-          centerSelectedOverlay();
-        }
-      });
+new ResizeObserver(() => renderWaveform()).observe(editorTimelineWrapper);
+
+editorTimelineWrapper.addEventListener(
+  'wheel',
+  (e: WheelEvent) => {
+    if (!editorState) return;
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const factor = 1 - e.deltaY * 0.01;
+      applyTimelineZoom(timelineZoom * factor, e.clientX);
     }
+  },
+  { passive: false }
+);
 
-    // Auto-track toggle
-    if (editorAutoTrackToggle) {
-      editorAutoTrackToggle.addEventListener('click', () => {
-        if (!editorState || editorState.rendering) return;
-        const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
-        if (!section) return;
-        const anchor = getSectionAnchorKeyframe(section.id, true);
-        if (!anchor) return;
-        pushUndo();
-        anchor.autoTrack = !anchor.autoTrack;
-        updateSectionZoomControls();
-        scheduleProjectSave();
-      });
+editorUndoBtn.addEventListener('click', editorUndo);
+editorRedoBtn.addEventListener('click', editorRedo);
+editorPlayBtn.addEventListener('click', editorTogglePlay);
+editorSplitBtn.addEventListener('click', () => {
+  if (editorState?.selectedAudioOverlayId) {
+    splitAudioOverlayAtPlayhead();
+  } else if (editorState?.selectedOverlayId) {
+    splitOverlayAtPlayhead();
+  } else {
+    splitSectionAtPlayhead();
+  }
+});
+editorToggleCamBtn.addEventListener('click', toggleCameraVisibility);
+editorCamFullBtn.addEventListener('click', toggleCameraFullscreen);
+editorApplyFutureBtn.addEventListener('click', applyStyleToFutureSections);
+editorBgZoomInput.addEventListener('input', () => {
+  if (!editorState || editorState.rendering) return;
+  const changed = setSelectedSectionBackgroundZoom(editorBgZoomInput.value, {
+    pushHistory: !sectionZoomDragActive
+  });
+  if (changed) setSectionZoomDragActive(true);
+});
+editorBgZoomInput.addEventListener('change', commitSectionZoomChange);
+editorBgZoomInput.addEventListener('pointerup', commitSectionZoomChange);
+editorBgZoomInput.addEventListener('blur', commitSectionZoomChange);
+
+// Scrub drag for Zoom control
+initScrubDrag(editorBgZoomScrub, editorBgZoomValue, editorBgZoomInput);
+initScrubDrag(editorPipSizeScrub, editorPipSizeValue, editorPipSizeInput);
+initScrubDrag(editorOverlaySizeScrub ?? null, editorOverlaySizeValue, editorOverlaySizeInput);
+initScrubDrag(
+  editorAutoTrackSmoothScrub ?? null,
+  editorAutoTrackSmoothValue ?? null,
+  editorAutoTrackSmoothInput
+);
+
+// Click on "Size" label centers the selected overlay (click = < 3px movement)
+if (editorOverlaySizeScrub) {
+  let sizeClickStartX = 0;
+  editorOverlaySizeScrub.addEventListener('mousedown', (e: MouseEvent) => {
+    sizeClickStartX = e.clientX;
+  });
+  editorOverlaySizeScrub.addEventListener('mouseup', (e: MouseEvent) => {
+    if (Math.abs(e.clientX - sizeClickStartX) < 3) {
+      centerSelectedOverlay();
     }
+  });
+}
 
-    // Auto-track smoothing input
-    let autoTrackSmoothDragActive = false;
-    if (editorAutoTrackSmoothInput) {
-      editorAutoTrackSmoothInput.addEventListener('input', () => {
-        if (!editorState || editorState.rendering) return;
-        const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
-        if (!section) return;
-        const anchor = getSectionAnchorKeyframe(section.id, true);
-        if (!anchor) return;
-        if (!autoTrackSmoothDragActive) pushUndo();
-        autoTrackSmoothDragActive = true;
-        anchor.autoTrackSmoothing = Math.max(0.01, Math.min(1.0, parseFloat(editorAutoTrackSmoothInput!.value)));
-        if (editorAutoTrackSmoothValue) editorAutoTrackSmoothValue.textContent = anchor.autoTrackSmoothing.toFixed(2);
-      });
-      const commitAutoTrackSmooth = () => {
-        if (autoTrackSmoothDragActive) scheduleProjectSave();
-        autoTrackSmoothDragActive = false;
-      };
-      editorAutoTrackSmoothInput.addEventListener('change', commitAutoTrackSmooth);
-      editorAutoTrackSmoothInput.addEventListener('pointerup', commitAutoTrackSmooth);
-      editorAutoTrackSmoothInput.addEventListener('blur', commitAutoTrackSmooth);
-    }
-
-    function centerSelectedOverlay(): void {
-      if (!editorState || editorState.rendering || !editorState.selectedOverlayId) return;
-      const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-      if (!overlay) return;
-      pushUndo();
-      const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
-      const pos = overlay[mode];
-      if (mode === 'reel') {
-        // Overlay positions are in landscape canvas space; center within the reel crop area
-        const kf = getStateAtTime(editorState.currentTime);
-        const cw = getContentWidth(editorState.sourceWidth, editorState.sourceHeight, editorState.screenFitMode);
-        const cropOffset = reelCropXToPixelOffset(kf.reelCropX, kf.backgroundZoom, cw);
-        pos.x = Math.round(cropOffset + (REEL_CANVAS_W - pos.width) / 2);
-      } else {
-        pos.x = Math.round((CANVAS_W - pos.width) / 2);
-      }
-      pos.y = Math.round((CANVAS_H - pos.height) / 2);
-      scheduleProjectSave();
-    }
-
-    // Overlay size input handler
-    let overlaySizeDragActive = false;
-    editorOverlaySizeInput.addEventListener('input', () => {
-      if (!editorState || editorState.rendering || !editorState.selectedOverlayId) return;
-      const overlay = editorState.overlays.find(o => o.id === editorState!.selectedOverlayId);
-      if (!overlay) return;
-      if (!overlaySizeDragActive) pushUndo();
-      overlaySizeDragActive = true;
-      const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
-      const pos = overlay[mode];
-      const aspect = pos.width / Math.max(1, pos.height);
-      const baseW = mode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
-      const newW = Math.max(20, Math.round(baseW * 0.4 * parseFloat(editorOverlaySizeInput.value)));
-      const newH = Math.max(20, Math.round(newW / aspect));
-      const cx = pos.x + pos.width / 2;
-      const cy = pos.y + pos.height / 2;
-      pos.x = Math.round(cx - newW / 2);
-      pos.y = Math.round(cy - newH / 2);
-      pos.width = newW;
-      pos.height = newH;
-      editorOverlaySizeValue.textContent = `${Math.round(parseFloat(editorOverlaySizeInput.value) * 100)}%`;
-    });
-    const commitOverlaySizeChange = () => {
-      if (overlaySizeDragActive) scheduleProjectSave();
-      overlaySizeDragActive = false;
-    };
-    editorOverlaySizeInput.addEventListener('change', commitOverlaySizeChange);
-    editorOverlaySizeInput.addEventListener('pointerup', commitOverlaySizeChange);
-    editorOverlaySizeInput.addEventListener('blur', commitOverlaySizeChange);
-
-    // Output mode toggle buttons
-    if (editorModeLandscapeBtn) {
-      editorModeLandscapeBtn.addEventListener('click', () => setOutputMode('landscape'));
-    }
-    if (editorModeReelBtn) {
-      editorModeReelBtn.addEventListener('click', () => setOutputMode('reel'));
-    }
-
-    // Crop preset buttons
-    function setCropPreset(cropX: number): void {
-      if (!editorState || editorState.rendering || editorState.outputMode !== 'reel') return;
-      const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
-      if (!section) return;
-      const anchor = getSectionAnchorKeyframe(section.id, true);
-      if (!anchor) return;
-      if (Math.abs(clampReelCropX(anchor.reelCropX) - cropX) < 0.001) return;
-      pushUndo();
-      anchor.reelCropX = cropX;
-      scheduleProjectSave();
-    }
-    if (editorCropLeftBtn) editorCropLeftBtn.addEventListener('click', () => setCropPreset(-1));
-    if (editorCropCenterBtn) editorCropCenterBtn.addEventListener('click', () => setCropPreset(0));
-    if (editorCropRightBtn) editorCropRightBtn.addEventListener('click', () => setCropPreset(1));
-
-    // PIP size slider
-    let pipSizeDragActive = false;
-    if (editorPipSizeInput) {
-      editorPipSizeInput.addEventListener('input', () => {
-        if (!editorState || editorState.rendering) return;
-        const newScale = Math.max(MIN_PIP_SCALE, Math.min(MAX_PIP_SCALE, Number(editorPipSizeInput!.value)));
-        if (!pipSizeDragActive) pushUndo();
-        pipSizeDragActive = true;
-
-        const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
-        if (section) {
-          const anchor = getSectionAnchorKeyframe(section.id, true);
-          if (anchor) {
-            anchor.pipScale = newScale;
-            const { w, h } = getEffectiveCanvasDimensions();
-            const newPipSize = computePipSize(newScale, w);
-            const pos = getSnapPointPosition(anchor.pipSnapPoint || 'br', w, h, newPipSize);
-            anchor.pipX = pos.x;
-            anchor.pipY = pos.y;
-          }
-        }
-
-        if (editorPipSizeValue) editorPipSizeValue.textContent = newScale.toFixed(2);
-        scheduleProjectSave();
-      });
-      const commitPipSizeChange = () => { pipSizeDragActive = false; };
-      editorPipSizeInput.addEventListener('change', commitPipSizeChange);
-      editorPipSizeInput.addEventListener('pointerup', commitPipSizeChange);
-      editorPipSizeInput.addEventListener('blur', commitPipSizeChange);
-    }
-
+// Auto-track toggle
+if (editorAutoTrackToggle) {
+  editorAutoTrackToggle.addEventListener('click', () => {
+    if (!editorState || editorState.rendering) return;
+    const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
+    if (!section) return;
+    const anchor = getSectionAnchorKeyframe(section.id, true);
+    if (!anchor) return;
+    pushUndo();
+    anchor.autoTrack = !anchor.autoTrack;
     updateSectionZoomControls();
+    scheduleProjectSave();
+  });
+}
 
-    // ===== Render pipeline =====
+// Auto-track smoothing input
+if (editorAutoTrackSmoothInput) {
+  editorAutoTrackSmoothInput.addEventListener('input', () => {
+    if (!editorState || editorState.rendering) return;
+    const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
+    if (!section) return;
+    const anchor = getSectionAnchorKeyframe(section.id, true);
+    if (!anchor) return;
+    if (!autoTrackSmoothDragActive) pushUndo();
+    setAutoTrackSmoothDragActive(true);
+    anchor.autoTrackSmoothing = Math.max(
+      0.01,
+      Math.min(1.0, parseFloat(editorAutoTrackSmoothInput!.value))
+    );
+    if (editorAutoTrackSmoothValue)
+      editorAutoTrackSmoothValue.textContent = anchor.autoTrackSmoothing.toFixed(2);
+  });
+  const commitAutoTrackSmooth = () => {
+    if (autoTrackSmoothDragActive) scheduleProjectSave();
+    setAutoTrackSmoothDragActive(false);
+  };
+  editorAutoTrackSmoothInput.addEventListener('change', commitAutoTrackSmooth);
+  editorAutoTrackSmoothInput.addEventListener('pointerup', commitAutoTrackSmooth);
+  editorAutoTrackSmoothInput.addEventListener('blur', commitAutoTrackSmooth);
+}
 
-    editorRenderBtn.addEventListener('click', async () => {
-      if (!editorState || editorState.rendering) return;
-      await renderVideo();
-    });
+// Overlay size input handler
+editorOverlaySizeInput.addEventListener('input', () => {
+  if (!editorState || editorState.rendering || !editorState.selectedOverlayId) return;
+  const overlay = editorState.overlays.find((o) => o.id === editorState!.selectedOverlayId);
+  if (!overlay) return;
+  if (!overlaySizeDragActive) pushUndo();
+  setOverlaySizeDragActive(true);
+  const mode: 'reel' | 'landscape' = editorState.outputMode === 'reel' ? 'reel' : 'landscape';
+  const pos = overlay[mode];
+  const aspect = pos.width / Math.max(1, pos.height);
+  const baseW = mode === 'reel' ? REEL_CANVAS_W : CANVAS_W;
+  const newW = Math.max(20, Math.round(baseW * 0.4 * parseFloat(editorOverlaySizeInput.value)));
+  const newH = Math.max(20, Math.round(newW / aspect));
+  const cx = pos.x + pos.width / 2;
+  const cy = pos.y + pos.height / 2;
+  pos.x = Math.round(cx - newW / 2);
+  pos.y = Math.round(cy - newH / 2);
+  pos.width = newW;
+  pos.height = newH;
+  editorOverlaySizeValue.textContent = `${Math.round(parseFloat(editorOverlaySizeInput.value) * 100)}%`;
+});
+const commitOverlaySizeChange = () => {
+  if (overlaySizeDragActive) scheduleProjectSave();
+  setOverlaySizeDragActive(false);
+};
+editorOverlaySizeInput.addEventListener('change', commitOverlaySizeChange);
+editorOverlaySizeInput.addEventListener('pointerup', commitOverlaySizeChange);
+editorOverlaySizeInput.addEventListener('blur', commitOverlaySizeChange);
 
-    let thumbnailToastTimer: ReturnType<typeof setTimeout> | null = null;
+// Output mode toggle buttons
+if (editorModeLandscapeBtn) {
+  editorModeLandscapeBtn.addEventListener('click', () => setOutputMode('landscape'));
+}
+if (editorModeReelBtn) {
+  editorModeReelBtn.addEventListener('click', () => setOutputMode('reel'));
+}
 
-    function showThumbnailToast(message: string): void {
-      const toast = document.getElementById('editorThumbnailToast');
-      if (!toast) return;
-      toast.textContent = message;
-      toast.classList.remove('hidden');
-      if (thumbnailToastTimer) clearTimeout(thumbnailToastTimer);
-      thumbnailToastTimer = setTimeout(() => {
-        toast.classList.add('hidden');
-        thumbnailToastTimer = null;
-      }, 2000);
-    }
+// Crop preset buttons
+if (editorCropLeftBtn) editorCropLeftBtn.addEventListener('click', () => setCropPreset(-1));
+if (editorCropCenterBtn) editorCropCenterBtn.addEventListener('click', () => setCropPreset(0));
+if (editorCropRightBtn) editorCropRightBtn.addEventListener('click', () => setCropPreset(1));
 
-    function setRenderBtnState(text: string, style = 'idle'): void {
-      if (editorRenderTimeout) clearTimeout(editorRenderTimeout);
-      editorRenderBtn.textContent = text;
-      if (style === 'busy') {
-        editorRenderBtn.className = 'px-4 py-1.5 bg-neutral-700 text-neutral-300 rounded-lg text-sm font-medium transition-colors min-w-[80px] text-center cursor-wait';
-      } else if (style === 'done') {
-        editorRenderBtn.className = 'px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors min-w-[80px] text-center';
-      } else if (style === 'error') {
-        editorRenderBtn.className = 'px-4 py-1.5 bg-red-600 text-white rounded-lg text-sm font-medium transition-colors min-w-[80px] text-center';
-      } else {
-        editorRenderBtn.className = 'px-4 py-1.5 bg-white text-neutral-950 hover:bg-neutral-200 rounded-lg text-sm font-medium transition-colors min-w-[80px] text-center';
+// PIP size slider
+if (editorPipSizeInput) {
+  editorPipSizeInput.addEventListener('input', () => {
+    if (!editorState || editorState.rendering) return;
+    const newScale = Math.max(
+      MIN_PIP_SCALE,
+      Math.min(MAX_PIP_SCALE, Number(editorPipSizeInput!.value))
+    );
+    if (!pipSizeDragActive) pushUndo();
+    setPipSizeDragActive(true);
+
+    const section = getSelectedSection() || findSectionForTime(editorState.currentTime);
+    if (section) {
+      const anchor = getSectionAnchorKeyframe(section.id, true);
+      if (anchor) {
+        anchor.pipScale = newScale;
+        const { w, h } = getEffectiveCanvasDimensions();
+        const newPipSize = computePipSize(newScale, w);
+        const pos = getSnapPointPosition(anchor.pipSnapPoint || 'br', w, h, newPipSize);
+        anchor.pipX = pos.x;
+        anchor.pipY = pos.y;
       }
     }
 
-    let capturingThumbnail = false;
+    if (editorPipSizeValue) editorPipSizeValue.textContent = newScale.toFixed(2);
+    scheduleProjectSave();
+  });
+  const commitPipSizeChange = () => {
+    setPipSizeDragActive(false);
+  };
+  editorPipSizeInput.addEventListener('change', commitPipSizeChange);
+  editorPipSizeInput.addEventListener('pointerup', commitPipSizeChange);
+  editorPipSizeInput.addEventListener('blur', commitPipSizeChange);
+}
 
-    async function captureThumbnailFrame(): Promise<void> {
-      if (capturingThumbnail || !editorState || !activeProjectPath) return;
+updateSectionZoomControls();
 
-      const resolved = resolveTimeToSource(editorState.currentTime);
-      if (!resolved) return;
+// ===== Render pipeline =====
 
-      const take = activeProject?.takes?.find((t: Take) => t.id === resolved.takeId);
-      const hasWindowOverlays = (editorState.overlays || []).some(o => o.mediaType === 'window');
-      if (!take?.screenPath && !hasWindowOverlays) return;
+editorRenderBtn.addEventListener('click', async () => {
+  if (!editorState || editorState.rendering) return;
+  await renderVideo();
+});
 
-      capturingThumbnail = true;
-      showThumbnailToast('Capturing...');
+// ===== Segment selection =====
 
-      try {
-        const state = getStateAtTime(editorState.currentTime);
-        const frozenKeyframe: Keyframe = {
-          time: 0,
-          pipX: state.pipX,
-          pipY: state.pipY,
-          pipVisible: state.pipVisible,
-          cameraFullscreen: state.cameraFullscreen,
-          backgroundZoom: state.backgroundZoom,
-          backgroundPanX: state.backgroundPanX,
-          backgroundPanY: state.backgroundPanY,
-          reelCropX: state.reelCropX,
-          pipScale: state.pipScale,
-          pipSnapPoint: state.pipSnapPoint,
-          autoTrack: state.autoTrack,
-          autoTrackSmoothing: state.autoTrackSmoothing,
-          sectionId: null,
-          autoSection: false,
-          savedLandscape: null,
-          savedReel: null,
-          backgroundFocusX: state.backgroundFocusX,
-          backgroundFocusY: state.backgroundFocusY
-        };
+transcriptContent.addEventListener('click', (e: MouseEvent) => {
+  if (!(e.target as HTMLElement).closest('[data-segment-index]')) selectSegment(-1);
+});
 
-        const currentTime = editorState.currentTime;
-        const visibleOverlays = (editorState.overlays || [])
-          .filter(o => o.startTime <= currentTime && currentTime < o.endTime)
-          .map(o => {
-            const delta = currentTime - o.startTime;
-            const isVideoLike = o.mediaType === 'video' || o.mediaType === 'window';
-            return {
-              ...o,
-              startTime: 0,
-              endTime: 0.1,
-              sourceStart: isVideoLike ? o.sourceStart + delta : o.sourceStart,
-              sourceEnd: isVideoLike ? o.sourceStart + delta + 0.1 : o.sourceEnd
-            };
-          });
+// ===== Keyboard shortcuts =====
 
-        await window.electronAPI.captureThumbnail({
-          takes: take ? [{ id: take.id, screenPath: take.screenPath, cameraPath: take.cameraPath, mousePath: take.mousePath || null, windowPaths: take.windowPaths || null }] : [],
-          keyframes: [frozenKeyframe],
-          overlays: visibleOverlays,
-          wallpaperPath: hasWindowOverlays ? backgroundImagePath : null,
-          timelineTime: editorState.currentTime,
-          sourceTime: resolved.sourceTime,
-          cameraSyncOffsetMs: editorState.cameraSyncOffsetMs,
-          sourceWidth: editorState.sourceWidth || CANVAS_W,
-          sourceHeight: editorState.sourceHeight || CANVAS_H,
-          outputMode: editorState.outputMode || 'landscape',
-          screenFitMode: editorState.screenFitMode as 'fit' | 'fill',
-          pipSize: editorState.pipSize,
-          projectFolder: activeProjectPath
-        });
-
-        showThumbnailToast('Thumbnail saved');
-      } catch (err) {
-        console.error('Thumbnail capture error:', err);
-        showThumbnailToast('Capture failed');
-      } finally {
-        capturingThumbnail = false;
-      }
-    }
-
-    async function renderVideo(): Promise<void> {
-      commitSectionZoomChange();
-      editorState!.rendering = true;
-      editorState!.renderProgress = 0;
-      setRenderBtnState('Rendering...', 'busy');
-      processingTitle.textContent = 'Rendering export...';
-      processingStatus.textContent = 'Preparing render...';
-      setProcessingProgress(0);
-      editorPause();
-
-      editorUndoBtn.disabled = true;
-      editorRedoBtn.disabled = true;
-      editorPlayBtn.disabled = true;
-      editorSplitBtn.disabled = true;
-      editorToggleCamBtn.disabled = true;
-      editorCamFullBtn.disabled = true;
-      editorRenderBtn.disabled = true;
-      updateSectionZoomControls();
-
-      try {
-        const renderKeyframes = getRenderKeyframes();
-        const renderSections = getRenderSections();
-
-        const referencedTakeIds = new Set(editorState!.sections.map(s => s.takeId).filter(Boolean) as string[]);
-        const takes: Array<{ id: string; screenPath: string | null; cameraPath: string | null; mousePath: string | null; windowPaths: Array<{ name: string; path: string }> | null }> = [];
-        for (const takeId of referencedTakeIds) {
-          const take = activeProject?.takes?.find((t: Take) => t.id === takeId);
-          if (take) {
-            takes.push({ id: take.id, screenPath: take.screenPath, cameraPath: take.cameraPath, mousePath: take.mousePath || null, windowPaths: take.windowPaths || null });
-          }
-        }
-
-        const mp4Path = await window.electronAPI.renderComposite({
-          takes,
-          sections: renderSections,
-          keyframes: renderKeyframes,
-          pipSize: editorState!.pipSize,
-          screenFitMode: editorState!.screenFitMode as 'fit' | 'fill',
-          exportAudioPreset: normalizeExportAudioPreset(exportAudioPresetSelect.value) as 'off' | 'compressed',
-          cameraSyncOffsetMs: editorState!.cameraSyncOffsetMs,
-          sourceWidth: editorState!.sourceWidth || CANVAS_W,
-          sourceHeight: editorState!.sourceHeight || CANVAS_H,
-          outputMode: editorState!.outputMode || 'landscape',
-          overlays: editorState!.overlays || [],
-          audioOverlays: editorState!.audioOverlays || [],
-          wallpaperPath: backgroundImagePath,
-          outputFolder: saveFolder
-        });
-
-        editorState!.rendering = false;
-        editorState!.renderProgress = 1;
-        setProcessingProgress(1);
-        setRenderBtnState('Done!', 'done');
-        console.log('Rendered:', mp4Path);
-        await persistProjectNow();
-      } catch (err) {
-        editorState!.rendering = false;
-        editorState!.renderProgress = 0;
-        setProcessingProgress(null);
-        console.error('Render error:', err);
-        setRenderBtnState('Failed', 'error');
-      }
-
-      updateUndoRedoButtons();
-      editorPlayBtn.disabled = false;
-      editorSplitBtn.disabled = false;
-      editorToggleCamBtn.disabled = false;
-      editorCamFullBtn.disabled = false;
-      editorRenderBtn.disabled = false;
-      updateSectionZoomControls();
-
-      editorRenderTimeout = setTimeout(() => setRenderBtnState('Render', 'idle'), 3000);
-      editorSeek(0);
-    }
-
-    // ===== Segment selection =====
-
-    transcriptContent.addEventListener('click', (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest('[data-segment-index]')) selectSegment(-1);
-    });
-
-    let selectedSegmentIndex = -1;
-
-    function selectSegment(index: number): void {
-      if (selectedSegmentIndex >= 0) {
-        const prev = transcriptContent.querySelector(`[data-segment-index="${selectedSegmentIndex}"]`) as HTMLElement | null;
-        if (prev) prev.style.outline = '';
-      }
-      selectedSegmentIndex = index;
-      if (index >= 0) {
-        const el = transcriptContent.querySelector(`[data-segment-index="${index}"]`) as HTMLElement | null;
-        if (el) el.style.outline = '2px solid rgba(255, 255, 255, 0.3)';
-      }
-    }
-
-    function applySegmentDeletedStyle(el: HTMLElement, deleted: boolean): void {
-      el.style.textDecoration = deleted ? 'line-through' : '';
-      el.style.opacity = deleted ? '0.4' : '';
-    }
-
-    // ===== Keyboard shortcuts =====
-
-    function updateSegmentBadge(): void {
-      const total = speechSegments.length;
-      const removed = speechSegments.filter(s => s.deleted).length;
-      const active = total - removed;
-      if (removed > 0) {
-        segmentBadge.textContent = `${active} segment${active !== 1 ? 's' : ''} (${removed} removed)`;
-      } else {
-        segmentBadge.textContent = `${total} segment${total !== 1 ? 's' : ''}`;
-      }
-    }
-
-    document.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (recording && e.code === 'Backspace') {
-        e.preventDefault();
-        if (selectedSegmentIndex >= 0 && selectedSegmentIndex < speechSegments.length) {
-          const seg = speechSegments[selectedSegmentIndex]!;
-          seg.deleted = !seg.deleted;
-          const el = transcriptContent.querySelector(`[data-segment-index="${selectedSegmentIndex}"]`) as HTMLElement | null;
-          if (el) applySegmentDeletedStyle(el, !!seg.deleted);
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (recording && e.code === 'Backspace') {
+    e.preventDefault();
+    if (selectedSegmentIndex >= 0 && selectedSegmentIndex < speechSegments.length) {
+      const seg = speechSegments[selectedSegmentIndex]!;
+      seg.deleted = !seg.deleted;
+      const el = transcriptContent.querySelector(
+        `[data-segment-index="${selectedSegmentIndex}"]`
+      ) as HTMLElement | null;
+      if (el) applySegmentDeletedStyle(el, !!seg.deleted);
+      updateSegmentBadge();
+    } else {
+      for (let i = speechSegments.length - 1; i >= 0; i--) {
+        if (!speechSegments[i]!.deleted) {
+          speechSegments[i]!.deleted = true;
+          const el = transcriptContent.querySelector(
+            `[data-segment-index="${i}"]`
+          ) as HTMLElement | null;
+          if (el) applySegmentDeletedStyle(el, true);
           updateSegmentBadge();
-        } else {
-          for (let i = speechSegments.length - 1; i >= 0; i--) {
-            if (!speechSegments[i]!.deleted) {
-              speechSegments[i]!.deleted = true;
-              const el = transcriptContent.querySelector(`[data-segment-index="${i}"]`) as HTMLElement | null;
-              if (el) applySegmentDeletedStyle(el, true);
-              updateSegmentBadge();
-              break;
-            }
-          }
+          break;
         }
-        return;
-      }
-
-      if (recording && e.code === 'Escape') {
-        selectSegment(-1);
-        return;
-      }
-
-      // Cmd+B: pick background image — works in both recording and editor views
-      if (e.code === 'KeyB' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        pickAndLoadBackground();
-        return;
-      }
-
-      if (!editorState || editorState.rendering || activeWorkspaceView !== 'timeline') return;
-      if ((e.target as HTMLElement).tagName === 'SELECT' || (e.target as HTMLElement).tagName === 'INPUT') return;
-
-      if (e.code === 'KeyZ' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        if (e.shiftKey) { editorRedo(); } else { editorUndo(); }
-        return;
-      }
-
-      if (e.code === 'KeyT' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        captureThumbnailFrame();
-        return;
-      }
-
-      if (e.code === 'Space') {
-        e.preventDefault();
-        editorTogglePlay();
-      } else if (e.code === 'ArrowLeft') {
-        e.preventDefault();
-        const stepL = (e.metaKey || e.ctrlKey) ? 5 / 30 : 1 / 30;
-        editorSeek(editorState.currentTime - stepL);
-      } else if (e.code === 'ArrowRight') {
-        e.preventDefault();
-        const stepR = (e.metaKey || e.ctrlKey) ? 5 / 30 : 1 / 30;
-        editorSeek(editorState.currentTime + stepR);
-      } else if (e.code === 'ArrowUp') {
-        e.preventDefault();
-        const boundaries = getTimelineBoundaries();
-        const nextB = boundaries.find(t => t > editorState!.currentTime + 0.001);
-        if (nextB !== undefined) editorSeek(nextB);
-      } else if (e.code === 'ArrowDown') {
-        e.preventDefault();
-        const boundaries = getTimelineBoundaries();
-        let prevB: number | null = null;
-        for (const t of boundaries) {
-          if (t < editorState!.currentTime - 0.001) prevB = t;
-          else break;
-        }
-        if (prevB !== null) editorSeek(prevB);
-      } else if (e.code === 'Backspace' || e.code === 'Delete') {
-        e.preventDefault();
-        if (editorState?.selectedOverlayId && !(e.metaKey || e.ctrlKey)) {
-          deleteSelectedOverlay();
-        } else if (editorState?.selectedAudioOverlayId && !(e.metaKey || e.ctrlKey)) {
-          deleteSelectedAudioOverlay();
-        } else {
-          // Cmd+Delete: find section at playhead; plain Delete: use selected section
-          if (e.metaKey || e.ctrlKey) {
-            const sectionAtPlayhead = findSectionForTime(editorState!.currentTime);
-            if (sectionAtPlayhead) {
-              editorState!.selectedSectionId = sectionAtPlayhead.id;
-            }
-          }
-          deleteSelectedSection();
-        }
-      } else if (e.code === 'KeyS') {
-        e.preventDefault();
-        if (e.metaKey || e.ctrlKey) {
-          splitAllAtPlayhead();
-        } else if (editorState?.selectedOverlayId) {
-          splitOverlayAtPlayhead();
-        } else if (editorState?.selectedAudioOverlayId) {
-          splitAudioOverlayAtPlayhead();
-        } else {
-          splitAllAtPlayhead();
-        }
-      } else if (e.code === 'KeyC') {
-        e.preventDefault();
-        toggleCameraVisibility();
-      } else if (e.code === 'KeyF') {
-        e.preventDefault();
-        toggleCameraFullscreen();
-      } else if (e.code === 'KeyL') {
-        e.preventDefault();
-        cyclePlaybackSpeed();
-      }
-    });
-
-    // Settings
-    openFolderBtn.addEventListener('click', () => {
-      if (activeProjectPath) window.electronAPI.openFolder(activeProjectPath);
-    });
-
-    activeProjectPathEl.addEventListener('click', () => {
-      if (activeProjectPath) window.electronAPI.openFolder(activeProjectPath);
-    });
-
-    pickFolderBtn.addEventListener('click', () => {
-      setWorkspaceView('home');
-    });
-
-    contentProtectionToggle.addEventListener('change', async () => {
-      hideFromRecording = contentProtectionToggle.checked ? 'true' : 'false';
-      await syncContentProtection();
-      scheduleProjectSave();
-    });
-
-    exportAudioPresetSelect.addEventListener('change', () => {
-      exportAudioPresetSelect.value = normalizeExportAudioPreset(exportAudioPresetSelect.value);
-      if (activeProject?.settings) {
-        activeProject.settings.exportAudioPreset = exportAudioPresetSelect.value;
-      }
-      scheduleProjectSave();
-    });
-
-    cameraSyncOffsetInput.addEventListener('change', () => {
-      const normalized = normalizeCameraSyncOffsetMs(cameraSyncOffsetInput.value);
-      cameraSyncOffsetInput.value = String(normalized);
-      if (activeProject?.settings) {
-        activeProject.settings.cameraSyncOffsetMs = normalized;
-      }
-      if (editorState) {
-        editorState.cameraSyncOffsetMs = normalized;
-        editorSeek(editorState.currentTime);
-      }
-      scheduleProjectSave();
-    });
-
-    screenFitSelect.addEventListener('change', () => {
-      if (editorState) editorState.screenFitMode = screenFitSelect.value;
-      updatePreview();
-      scheduleProjectSave();
-    });
-
-    screenSelect.addEventListener('change', async () => {
-      try { await updateScreenStream(); } catch (_e) { console.error(_e); }
-      updatePreview();
-    });
-
-    cameraSelect.addEventListener('change', async () => {
-      try { await updateCameraStream(); } catch (_e) { console.error(_e); }
-      updatePreview();
-    });
-
-    audioSelect.addEventListener('change', async () => {
-      try { await updateAudioStream(); } catch (_e) { console.error(_e); }
-    });
-
-    recordBtn.addEventListener('click', toggleRecording);
-
-    goRecordingBtn.addEventListener('click', () => {
-      if (!activeProjectPath) return;
-      setWorkspaceView('recording');
-    });
-
-    goTimelineBtn.addEventListener('click', () => {
-      if (!activeProjectPath || !editorState) return;
-      setWorkspaceView('timeline');
-    });
-
-    switchProjectBtn.addEventListener('click', async () => {
-      if (recording) return;
-      await flushScheduledProjectSave();
-      if (activeProjectPath) {
-        try { await window.electronAPI.cleanupDeleted(activeProjectPath); } catch (_e) { /* best effort */ }
-      }
-      setWorkspaceView('home');
-      await refreshRecentProjects();
-    });
-
-    // Project home actions
-    async function openProjectByPath(projectPath: string, preferredView = 'timeline'): Promise<void> {
-      if (!projectPath) return;
-      clearProjectHomeMessage();
-      try {
-        const opened = await window.electronAPI.projectOpen(projectPath);
-        if (!opened?.projectPath || !opened?.project) return;
-        await activateProject(opened.projectPath, opened.project, preferredView);
-        if (opened?.recoveryTake) {
-          await recoverPendingTake(opened.recoveryTake);
-        }
-        await refreshRecentProjects();
-      } catch (error) {
-        console.error('Failed to open project:', error);
-        showProjectHomeMessage((error as Error)?.message || 'Failed to open project folder.');
       }
     }
+    return;
+  }
 
-    projectHomeView.addEventListener('click', (event: MouseEvent) => {
-      const target = (event.target as HTMLElement)?.id || (event.target as HTMLElement)?.tagName || 'unknown';
-      console.log('project-home-click', target);
-    }, true);
+  if (recording && e.code === 'Escape') {
+    selectSegment(-1);
+    return;
+  }
 
-    createProjectBtn.addEventListener('click', async () => {
-      const name = (newProjectNameInput.value || '').trim() || 'Untitled Project';
-      showProjectHomeMessage('Opening folder picker...', 'info');
-      try {
-        const projectPath = await window.electronAPI.pickProjectLocation({ name });
-        if (!projectPath) return;
-        const created = await window.electronAPI.projectCreate({ projectPath, name });
-        if (!created?.projectPath || !created?.project) return;
-        newProjectNameInput.value = '';
-        clearProjectHomeMessage();
-        await activateProject(created.projectPath, created.project, 'recording');
-        await refreshRecentProjects();
-      } catch (error) {
-        console.error('Failed to create project:', error);
-        showProjectHomeMessage((error as Error)?.message || 'Failed to create project.');
+  // Cmd+B: pick background image — works in both recording and editor views
+  if (e.code === 'KeyB' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    pickAndLoadBackground();
+    return;
+  }
+
+  if (!editorState || editorState.rendering || activeWorkspaceView !== 'timeline') return;
+  if (
+    (e.target as HTMLElement).tagName === 'SELECT' ||
+    (e.target as HTMLElement).tagName === 'INPUT'
+  )
+    return;
+
+  if (e.code === 'KeyZ' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    if (e.shiftKey) {
+      editorRedo();
+    } else {
+      editorUndo();
+    }
+    return;
+  }
+
+  if (e.code === 'KeyT' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    captureThumbnailFrame();
+    return;
+  }
+
+  if (e.code === 'Space') {
+    e.preventDefault();
+    editorTogglePlay();
+  } else if (e.code === 'ArrowLeft') {
+    e.preventDefault();
+    const stepL = e.metaKey || e.ctrlKey ? 5 / 30 : 1 / 30;
+    editorSeek(editorState.currentTime - stepL);
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault();
+    const stepR = e.metaKey || e.ctrlKey ? 5 / 30 : 1 / 30;
+    editorSeek(editorState.currentTime + stepR);
+  } else if (e.code === 'ArrowUp') {
+    e.preventDefault();
+    const boundaries = getTimelineBoundaries();
+    const nextB = boundaries.find((t) => t > editorState!.currentTime + 0.001);
+    if (nextB !== undefined) editorSeek(nextB);
+  } else if (e.code === 'ArrowDown') {
+    e.preventDefault();
+    const boundaries = getTimelineBoundaries();
+    let prevB: number | null = null;
+    for (const t of boundaries) {
+      if (t < editorState!.currentTime - 0.001) prevB = t;
+      else break;
+    }
+    if (prevB !== null) editorSeek(prevB);
+  } else if (e.code === 'Backspace' || e.code === 'Delete') {
+    e.preventDefault();
+    if (editorState?.selectedOverlayId && !(e.metaKey || e.ctrlKey)) {
+      deleteSelectedOverlay();
+    } else if (editorState?.selectedAudioOverlayId && !(e.metaKey || e.ctrlKey)) {
+      deleteSelectedAudioOverlay();
+    } else {
+      // Cmd+Delete: find section at playhead; plain Delete: use selected section
+      if (e.metaKey || e.ctrlKey) {
+        const sectionAtPlayhead = findSectionForTime(editorState!.currentTime);
+        if (sectionAtPlayhead) {
+          editorState!.selectedSectionId = sectionAtPlayhead.id;
+        }
       }
+      deleteSelectedSection();
+    }
+  } else if (e.code === 'KeyS') {
+    e.preventDefault();
+    if (e.metaKey || e.ctrlKey) {
+      splitAllAtPlayhead();
+    } else if (editorState?.selectedOverlayId) {
+      splitOverlayAtPlayhead();
+    } else if (editorState?.selectedAudioOverlayId) {
+      splitAudioOverlayAtPlayhead();
+    } else {
+      splitAllAtPlayhead();
+    }
+  } else if (e.code === 'KeyC') {
+    e.preventDefault();
+    toggleCameraVisibility();
+  } else if (e.code === 'KeyF') {
+    e.preventDefault();
+    toggleCameraFullscreen();
+  } else if (e.code === 'KeyL') {
+    e.preventDefault();
+    cyclePlaybackSpeed();
+  }
+});
+
+// Settings
+openFolderBtn.addEventListener('click', () => {
+  if (activeProjectPath) window.electronAPI.openFolder(activeProjectPath);
+});
+
+activeProjectPathEl.addEventListener('click', () => {
+  if (activeProjectPath) window.electronAPI.openFolder(activeProjectPath);
+});
+
+pickFolderBtn.addEventListener('click', () => {
+  setWorkspaceView('home');
+});
+
+contentProtectionToggle.addEventListener('change', async () => {
+  setHideFromRecording(contentProtectionToggle.checked ? 'true' : 'false');
+  await syncContentProtection();
+  scheduleProjectSave();
+});
+
+exportAudioPresetSelect.addEventListener('change', () => {
+  exportAudioPresetSelect.value = normalizeExportAudioPreset(exportAudioPresetSelect.value);
+  if (activeProject?.settings) {
+    activeProject.settings.exportAudioPreset = exportAudioPresetSelect.value;
+  }
+  scheduleProjectSave();
+});
+
+cameraSyncOffsetInput.addEventListener('change', () => {
+  const normalized = normalizeCameraSyncOffsetMs(cameraSyncOffsetInput.value);
+  cameraSyncOffsetInput.value = String(normalized);
+  if (activeProject?.settings) {
+    activeProject.settings.cameraSyncOffsetMs = normalized;
+  }
+  if (editorState) {
+    editorState.cameraSyncOffsetMs = normalized;
+    editorSeek(editorState.currentTime);
+  }
+  scheduleProjectSave();
+});
+
+screenFitSelect.addEventListener('change', () => {
+  if (editorState) editorState.screenFitMode = screenFitSelect.value;
+  updatePreview();
+  scheduleProjectSave();
+});
+
+screenSelect.addEventListener('change', async () => {
+  try {
+    await updateScreenStream();
+  } catch (_e) {
+    console.error(_e);
+  }
+  updatePreview();
+});
+
+cameraSelect.addEventListener('change', async () => {
+  try {
+    await updateCameraStream();
+  } catch (_e) {
+    console.error(_e);
+  }
+  updatePreview();
+});
+
+audioSelect.addEventListener('change', async () => {
+  try {
+    await updateAudioStream();
+  } catch (_e) {
+    console.error(_e);
+  }
+});
+
+recordBtn.addEventListener('click', toggleRecording);
+
+goRecordingBtn.addEventListener('click', () => {
+  if (!activeProjectPath) return;
+  setWorkspaceView('recording');
+});
+
+goTimelineBtn.addEventListener('click', () => {
+  if (!activeProjectPath || !editorState) return;
+  setWorkspaceView('timeline');
+});
+
+switchProjectBtn.addEventListener('click', async () => {
+  if (recording) return;
+  await flushScheduledProjectSave();
+  if (activeProjectPath) {
+    try {
+      await window.electronAPI.cleanupDeleted(activeProjectPath);
+    } catch (_e) {
+      /* best effort */
+    }
+  }
+  setWorkspaceView('home');
+  await refreshRecentProjects();
+});
+
+// Project home actions
+projectHomeView.addEventListener(
+  'click',
+  (event: MouseEvent) => {
+    const target =
+      (event.target as HTMLElement)?.id || (event.target as HTMLElement)?.tagName || 'unknown';
+    console.log('project-home-click', target);
+  },
+  true
+);
+
+createProjectBtn.addEventListener('click', async () => {
+  const name = (newProjectNameInput.value || '').trim() || 'Untitled Project';
+  showProjectHomeMessage('Opening folder picker...', 'info');
+  try {
+    const projectPath = await window.electronAPI.pickProjectLocation({ name });
+    if (!projectPath) return;
+    const created = await window.electronAPI.projectCreate({ projectPath, name });
+    if (!created?.projectPath || !created?.project) return;
+    newProjectNameInput.value = '';
+    clearProjectHomeMessage();
+    await activateProject(created.projectPath, created.project, 'recording');
+    await refreshRecentProjects();
+  } catch (error) {
+    console.error('Failed to create project:', error);
+    showProjectHomeMessage((error as Error)?.message || 'Failed to create project.');
+  }
+});
+
+openProjectBtn.addEventListener('click', async () => {
+  showProjectHomeMessage('Opening folder picker...', 'info');
+  try {
+    const folder = await window.electronAPI.pickFolder({
+      title: 'Open Project Folder',
+      buttonLabel: 'Open Project'
     });
+    if (!folder) return;
+    await openProjectByPath(folder, 'timeline');
+  } catch (error) {
+    console.error('Failed to choose project folder:', error);
+    showProjectHomeMessage((error as Error)?.message || 'Failed to choose project folder.');
+  }
+});
 
-    openProjectBtn.addEventListener('click', async () => {
-      showProjectHomeMessage('Opening folder picker...', 'info');
-      try {
-        const folder = await window.electronAPI.pickFolder({
-          title: 'Open Project Folder',
-          buttonLabel: 'Open Project'
-        });
-        if (!folder) return;
-        await openProjectByPath(folder, 'timeline');
-      } catch (error) {
-        console.error('Failed to choose project folder:', error);
-        showProjectHomeMessage((error as Error)?.message || 'Failed to choose project folder.');
-      }
-    });
+resumeLastBtn.addEventListener('click', async () => {
+  const projectPath = resumeLastBtn.dataset.projectPath;
+  if (!projectPath) return;
+  await openProjectByPath(projectPath, 'timeline');
+});
 
-    resumeLastBtn.addEventListener('click', async () => {
-      const projectPath = resumeLastBtn.dataset.projectPath;
-      if (!projectPath) return;
-      await openProjectByPath(projectPath, 'timeline');
-    });
+recentProjectsList.addEventListener('click', async (event: MouseEvent) => {
+  const button = (event.target as HTMLElement).closest(
+    'button[data-project-path]'
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  await openProjectByPath(button.dataset.projectPath!, 'timeline');
+});
 
-    recentProjectsList.addEventListener('click', async (event: MouseEvent) => {
-      const button = (event.target as HTMLElement).closest('button[data-project-path]') as HTMLButtonElement | null;
-      if (!button) return;
-      await openProjectByPath(button.dataset.projectPath!, 'timeline');
-    });
+saveAndCleanBtn.addEventListener('click', async () => {
+  const lastProjPath = resumeLastBtn.dataset.projectPath;
+  if (!lastProjPath) {
+    showProjectHomeMessage('No recent project to clean up.', 'info');
+    return;
+  }
+  try {
+    const result = await window.electronAPI.cleanupUnusedTakes(lastProjPath);
+    const count = result?.removedCount || 0;
+    const msg =
+      count > 0
+        ? `Cleanup complete. Removed ${count} unused take${count > 1 ? 's' : ''}.`
+        : 'Cleanup complete. No unused takes found.';
+    showProjectHomeMessage(msg, 'info');
+  } catch (error) {
+    console.error('Save & Clean failed:', error);
+    showProjectHomeMessage((error as Error)?.message || 'Cleanup failed.', 'error');
+  }
+});
 
-    saveAndCleanBtn.addEventListener('click', async () => {
-      const lastProjPath = resumeLastBtn.dataset.projectPath;
-      if (!lastProjPath) {
-        showProjectHomeMessage('No recent project to clean up.', 'info');
-        return;
-      }
-      try {
-        const result = await window.electronAPI.cleanupUnusedTakes(lastProjPath);
-        const count = result?.removedCount || 0;
-        const msg = count > 0
-          ? `Cleanup complete. Removed ${count} unused take${count > 1 ? 's' : ''}.`
-          : 'Cleanup complete. No unused takes found.';
-        showProjectHomeMessage(msg, 'info');
-      } catch (error) {
-        console.error('Save & Clean failed:', error);
-        showProjectHomeMessage((error as Error)?.message || 'Cleanup failed.', 'error');
-      }
-    });
+newProjectNameInput.addEventListener('keydown', async (event: KeyboardEvent) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  createProjectBtn.click();
+});
 
-    newProjectNameInput.addEventListener('keydown', async (event: KeyboardEvent) => {
-      if (event.key !== 'Enter') return;
-      event.preventDefault();
-      createProjectBtn.click();
-    });
+// Init
+cleanupAllMedia({
+  recording,
+  screenStream,
+  cameraStream,
+  audioStream,
+  recorders,
+  screenRecInterval,
+  audioSendInterval,
+  timerInterval,
+  audioContext,
+  scribeWorkletNode,
+  scribeWs,
+  drawRAF,
+  meterRAF,
+  cancelEditorDrawLoop,
+  stopAudioMeter,
+  windowStreams,
+  windowRecIntervals
+});
 
-    // Init
-    cleanupAllMedia({
-      recording, screenStream, cameraStream, audioStream,
-      recorders, screenRecInterval, audioSendInterval, timerInterval,
-      audioContext, scribeWorkletNode, scribeWs,
-      drawRAF, meterRAF, cancelEditorDrawLoop, stopAudioMeter,
-      windowStreams, windowRecIntervals
-    });
+setWorkspaceView('home');
+syncContentProtection();
+updateWorkspaceHeader();
+refreshRecentProjects();
 
-    setWorkspaceView('home');
-    syncContentProtection();
-    updateWorkspaceHeader();
-    refreshRecentProjects();
+window.addEventListener('beforeunload', () => {
+  if (mediaIdleTimer) {
+    clearTimeout(mediaIdleTimer);
+    setMediaIdleTimer(null);
+  }
+  cleanupAllMedia({
+    recording,
+    screenStream,
+    cameraStream,
+    audioStream,
+    recorders,
+    screenRecInterval,
+    audioSendInterval,
+    timerInterval,
+    audioContext,
+    scribeWorkletNode,
+    scribeWs,
+    drawRAF,
+    meterRAF,
+    cancelEditorDrawLoop,
+    stopAudioMeter,
+    windowStreams,
+    windowRecIntervals
+  });
+  setRecording(false);
+  setScreenStream(null);
+  setCameraStream(null);
+  setAudioStream(null);
+  setRecorders([]);
+  setScreenRecInterval(null);
+  setAudioSendInterval(null);
+  setAudioContext(null);
+  setScribeWorkletNode(null);
+  setScribeWs(null);
+  setDrawRAF(null);
+  setMeterRAF(null);
 
-    window.addEventListener('beforeunload', () => {
-      if (mediaIdleTimer) {
-        clearTimeout(mediaIdleTimer);
-        mediaIdleTimer = null;
-      }
-      cleanupAllMedia({
-        recording,
-        screenStream,
-        cameraStream,
-        audioStream,
-        recorders,
-        screenRecInterval,
-        audioSendInterval,
-        timerInterval,
-        audioContext,
-        scribeWorkletNode,
-        scribeWs,
-        drawRAF,
-        meterRAF,
-        cancelEditorDrawLoop,
-        stopAudioMeter,
-        windowStreams,
-        windowRecIntervals
-      });
-      recording = false;
-      screenStream = null;
-      cameraStream = null;
-      audioStream = null;
-      recorders = [];
-      screenRecInterval = null;
-      audioSendInterval = null;
-      audioContext = null;
-      scribeWorkletNode = null;
-      scribeWs = null;
-      drawRAF = null;
-      meterRAF = null;
+  flushScheduledProjectSave().catch((error: unknown) => {
+    console.warn('Failed to flush project save on exit:', error);
+  });
+  if (activeProjectPath) {
+    window.electronAPI.cleanupDeleted(activeProjectPath).catch(() => {});
+  }
+});
 
-      flushScheduledProjectSave().catch((error: unknown) => {
-        console.warn('Failed to flush project save on exit:', error);
-      });
-      if (activeProjectPath) {
-        window.electronAPI.cleanupDeleted(activeProjectPath).catch(() => {});
-      }
-    });
-
-    // Suppress unused variable warnings for intentionally-unused functions
-    void _clearRecoveryTake;
-    void _showProcessingState;
-    void _buildSectionAnchorSnapshot;
-    void _deleteNearestKeyframe;
-    void _exitEditor;
-    void PIP_FRACTION;
-    void resolveZoomCrop;
+// Suppress unused variable warnings for intentionally-unused functions
+void _clearRecoveryTake;
+void _showProcessingState;
+void _buildSectionAnchorSnapshot;
+void _deleteNearestKeyframe;
+void _exitEditor;
+void resolveZoomCrop;

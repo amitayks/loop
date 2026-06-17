@@ -4,6 +4,13 @@
 
 import type { Section } from '../../../shared/types/domain.js';
 import { normalizeTranscriptText } from '../transcript/transcript-utils.js';
+import {
+  roundMs,
+  buildMergedSegments,
+  remapToTimeline
+} from '../../../shared/domain/section-math.js';
+
+export { roundMs } from '../../../shared/domain/section-math.js';
 
 export const TRIM_PADDING = 0.15;
 
@@ -33,97 +40,37 @@ interface RawSection {
   saved?: boolean;
 }
 
-/** Padded segment after initial processing. */
-interface PaddedSegment {
-  start: number;
-  end: number;
-  transcript: string;
-}
-
-/** Merged segment with collected transcripts. */
-interface MergedSegment {
-  start: number;
-  end: number;
-  transcripts: string[];
-}
-
-/**
- * Rounds a numeric value to 3 decimal places (millisecond precision).
- */
-export function roundMs(value: number): number {
-  return Number(value.toFixed(3));
-}
-
 /**
  * Builds remapped sections from speech segments (padding, merge, timeline mapping).
+ *
+ * Delegates pad/filter/sort/merge/remap to the shared, transcript-agnostic
+ * section-math core, then reattaches transcripts via the `sourceIndices` the
+ * core hands back (renderer policy: clamp empty segments, merge when touching).
  */
 export function buildRemappedSectionsFromSegments(segments: SpeechSegment[]): RendererSection[] {
   if (!Array.isArray(segments) || segments.length === 0) return [];
 
-  const padded: PaddedSegment[] = segments
-    .map((segment): PaddedSegment | null => {
-      const rawStart = Number(segment.start);
-      const rawEnd = Number(segment.end);
-      if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) return null;
-      const start = Math.max(0, rawStart - TRIM_PADDING);
-      const end = Math.max(start, rawEnd + TRIM_PADDING);
-      return {
-        start,
-        end,
-        transcript: normalizeTranscriptText(segment.text)
-      };
-    })
-    .filter((s): s is PaddedSegment => s !== null)
-    .sort((a, b) => a.start - b.start);
+  const merged = buildMergedSegments(segments, {
+    padding: TRIM_PADDING,
+    emptyHandling: 'clamp',
+    mergeTouching: true
+  });
+  const { sections, sourceIndices } = remapToTimeline(merged);
 
-  if (padded.length === 0) return [];
-
-  const first = padded[0]!;
-  const merged: MergedSegment[] = [{
-    start: first.start,
-    end: first.end,
-    transcripts: first.transcript ? [first.transcript] : []
-  }];
-  for (let i = 1; i < padded.length; i++) {
-    const current = padded[i]!;
-    const last = merged[merged.length - 1]!;
-    if (current.start <= last.end) {
-      last.end = Math.max(last.end, current.end);
-      if (current.transcript) last.transcripts.push(current.transcript);
-    } else {
-      merged.push({
-        start: current.start,
-        end: current.end,
-        transcripts: current.transcript ? [current.transcript] : []
-      });
-    }
-  }
-
-  const remapped: RendererSection[] = [];
-  let timelineCursor = 0;
-  for (let i = 0; i < merged.length; i++) {
-    const segment = merged[i]!;
-    const sourceStart = roundMs(segment.start);
-    const sourceEnd = roundMs(segment.end);
-    const duration = Math.max(0, sourceEnd - sourceStart);
-    const start = roundMs(timelineCursor);
-    const end = roundMs(timelineCursor + duration);
-    remapped.push({
-      id: `section-${i + 1}`,
-      index: i,
-      sourceStart,
-      sourceEnd,
-      start,
-      end,
-      duration: roundMs(duration),
-      transcript: normalizeTranscriptText(segment.transcripts.join(' ')),
+  return sections.map((section, i): RendererSection => {
+    const transcript = normalizeTranscriptText(
+      sourceIndices[i]!
+        .map((idx) => normalizeTranscriptText(segments[idx]?.text))
+        .filter((text) => text)
+        .join(' ')
+    );
+    return {
+      ...section,
+      transcript,
       takeId: null,
       volume: 1.0
-    });
-    timelineCursor += duration;
-  }
-
-  return remapped;
+    };
+  });
 }
 
 /**
@@ -155,13 +102,14 @@ export function normalizeSections(rawSections: unknown, duration: unknown): Sect
         end = Math.min(end, safeDuration);
       }
 
-      let sourceStart = Number.isFinite(Number(section.sourceStart)) ? Number(section.sourceStart) : start;
-      let sourceEnd = Number.isFinite(Number(section.sourceEnd)) ? Number(section.sourceEnd) : end;
-      // Clamp source range to recording duration
-      if (safeDuration > 0) {
-        sourceStart = Math.max(0, Math.min(sourceStart, safeDuration));
-        sourceEnd = Math.max(sourceStart, Math.min(sourceEnd, safeDuration));
-      }
+      // NOTE: sourceStart/sourceEnd are NOT clamped here because `duration` may
+      // be either the take's source duration (fresh take) OR the timeline duration
+      // (loaded project). Clamping against the timeline duration destroys source
+      // pointers that correctly point into the take's full recording range.
+      // Source-range clamping happens in normalizeTakeSections, which is only
+      // called when duration == take source duration.
+      const sourceStart = Number.isFinite(Number(section.sourceStart)) ? Number(section.sourceStart) : start;
+      const sourceEnd = Number.isFinite(Number(section.sourceEnd)) ? Number(section.sourceEnd) : end;
 
       return {
         id: section.id || `section-${idx + 1}`,
@@ -224,12 +172,27 @@ export function buildDefaultSectionsForDuration(duration: unknown): Section[] {
 }
 
 /**
- * Normalizes sections or falls back to a single default section.
+ * Normalizes sections for a freshly-recorded take. Here `duration` is the
+ * take's source/recording duration, so source ranges can be safely clamped
+ * against it (protects against Scribe padding overshoot, etc).
  */
 export function normalizeTakeSections(rawSections: unknown, duration: unknown): Section[] {
+  const safeDuration = Math.max(0, Number(duration) || 0);
   const normalized = normalizeSections(rawSections, duration);
-  if (normalized.length > 0) return normalized;
-  return buildDefaultSectionsForDuration(duration);
+  if (normalized.length === 0) {
+    return buildDefaultSectionsForDuration(duration);
+  }
+
+  // Clamp source ranges to the take's recording duration
+  if (safeDuration > 0) {
+    for (const section of normalized) {
+      section.sourceStart = Math.max(0, Math.min(section.sourceStart, safeDuration));
+      section.sourceEnd = Math.max(section.sourceStart, Math.min(section.sourceEnd, safeDuration));
+      // Drop sections that became zero-duration after clamping
+    }
+  }
+
+  return normalized.filter(s => s.sourceEnd - s.sourceStart > 0.0001);
 }
 
 /** Transcript-bearing section candidate used for attachment. */
