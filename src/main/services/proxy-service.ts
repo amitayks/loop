@@ -56,11 +56,18 @@ export function generateProxy(
       try { fsImpl.unlinkSync(tmpPath); } catch (_) { /* ignore */ }
     }
 
+    // NOTE: resample to CFR 30 with the `fps` *filter* (PTS-aware), never with an
+    // input-side `-r` before `-i`. As an input option, `-r` makes ffmpeg discard
+    // the source WebM's real per-frame timestamps and assume a constant 30fps;
+    // MediaRecorder screen captures are variable-rate (few unique frames while the
+    // screen is static), so that collapses the recording into a much shorter,
+    // sped-up proxy. The `fps` filter duplicates/drops frames against real PTS to
+    // reach CFR 30 while preserving true wall-clock duration.
     const args: string[] = [
       '-progress', 'pipe:1', '-nostats',
-      '-r', '30',
       '-i', screenPath,
-      '-vf', 'scale=960:540',
+      '-vf', 'fps=30,scale=960:540',
+      '-fps_mode', 'cfr',
       '-c:v', 'libx264',
       '-crf', '23',
       '-preset', 'ultrafast',

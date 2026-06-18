@@ -52,6 +52,36 @@ describe('proxy-service -- generateProxy', () => {
     expect(fakeFs.unlinkSync).not.toHaveBeenCalled();
   });
 
+  test('preserves real-time duration: no input -r before -i, resamples via PTS-aware fps filter', async () => {
+    const generateProxyFresh = await freshGenerateProxy();
+    const fakeFs = makeFakeFs();
+    const fakeRun = makeRunFfmpeg(0);
+
+    await generateProxyFresh(
+      { screenPath: '/proj/screen.webm', proxyPath: '/proj/screen-proxy.mp4', ffmpegPath: '/ffmpeg' },
+      { runFfmpeg: fakeRun, fs: fakeFs }
+    );
+
+    const args = (fakeRun.mock.calls[0]![0] as { args: string[] }).args;
+    const inputIdx = args.indexOf('/proj/screen.webm');
+    expect(inputIdx).toBeGreaterThan(0);
+
+    // `-r` BEFORE `-i` is an *input* frame-rate override: ffmpeg discards the
+    // WebM's real per-frame timestamps and assumes constant 30fps. MediaRecorder
+    // screen captures are variable-rate (sparse during static stretches), so that
+    // collapses the file into a much shorter, sped-up proxy. The proxy must not
+    // carry any input-side `-r`.
+    expect(args.slice(0, inputIdx)).not.toContain('-r');
+
+    // Resampling to CFR 30 must instead happen in the filter chain (PTS-aware),
+    // so the proxy keeps real-time duration.
+    const vfIdx = args.indexOf('-vf');
+    expect(vfIdx).toBeGreaterThanOrEqual(0);
+    expect(args[vfIdx + 1]).toContain('fps=30');
+    expect(args).toContain('-fps_mode');
+    expect(args[args.indexOf('-fps_mode') + 1]).toBe('cfr');
+  });
+
   test('ffmpeg fails: .tmp is deleted and promise rejects', async () => {
     const generateProxyFresh = await freshGenerateProxy();
     const fakeFs = makeFakeFs({ existsSync: (p: string) => p.endsWith('.tmp') });

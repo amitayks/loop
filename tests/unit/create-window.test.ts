@@ -12,13 +12,20 @@ interface FakeWindow {
   loadFile: (file: string) => void;
 }
 
+interface CapturedOptions {
+  webPreferences?: { backgroundThrottling?: boolean; preload?: string };
+}
+
 function createFakeBrowserWindow(): {
   BrowserWindow: CreateWindowOptions['BrowserWindow'];
   handlers: Map<string, Handler>;
+  getOptions: () => CapturedOptions | undefined;
 } {
   const handlers = new Map<string, Handler>();
+  let capturedOptions: CapturedOptions | undefined;
 
-  const FakeBrowserWindow = function (this: FakeWindow): FakeWindow {
+  const FakeBrowserWindow = function (this: FakeWindow, options?: CapturedOptions): FakeWindow {
+    capturedOptions = options;
     this.webContents = {
       on: (event: string, handler: Handler) => {
         handlers.set(event, handler);
@@ -29,7 +36,7 @@ function createFakeBrowserWindow(): {
     return this;
   } as unknown as CreateWindowOptions['BrowserWindow'];
 
-  return { BrowserWindow: FakeBrowserWindow, handlers };
+  return { BrowserWindow: FakeBrowserWindow, handlers, getOptions: () => capturedOptions };
 }
 
 describe('createWindow', () => {
@@ -61,5 +68,19 @@ describe('createWindow', () => {
 
     handlers.get('render-process-gone')!(event, { reason: 'crashed' });
     expect(onRenderProcessGone).toHaveBeenCalledWith({ reason: 'crashed' });
+  });
+
+  test('disables backgroundThrottling so timer-driven screen/window capture keeps running when the window is backgrounded', () => {
+    const { BrowserWindow, getOptions } = createFakeBrowserWindow();
+
+    createWindow({ BrowserWindow });
+
+    // The screen and window recorders draw to a canvas on a setInterval loop and
+    // record canvas.captureStream(). Chromium throttles renderer timers when the
+    // window is backgrounded — which is exactly when the user switches to other
+    // windows during an "Entire Screen" recording — starving the capture of
+    // frames (choppy/low-fps screen track; the native camera track is immune).
+    // Disabling backgroundThrottling keeps the draw loop at full rate.
+    expect(getOptions()?.webPreferences?.backgroundThrottling).toBe(false);
   });
 });
