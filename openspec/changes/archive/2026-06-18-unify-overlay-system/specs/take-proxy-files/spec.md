@@ -32,7 +32,7 @@ The editor SHALL use proxy paths when available for all video-type overlay playb
 ## ADDED Requirements
 
 ### Requirement: Overlay proxy path storage
-Overlay objects with `mediaType: 'video'` or `'window'` MAY have a `proxyPath: string` field storing the path to the proxy file. This field is set when proxy generation completes and persisted in `project.json`.
+Overlay objects with `mediaType: 'video'` or `'window'` MAY have a `proxyPath: string` field storing the path to the proxy file. When proxy generation completes, the system SHALL set this field and persist it in `project.json`.
 
 #### Scenario: Proxy path stored on overlay
 - **WHEN** proxy generation completes for a window overlay's media file
