@@ -46,8 +46,16 @@ import {
 import { updatePreview } from '../drawing/compositing.js';
 import { pickAndLoadBackground } from '../background/background-image.js';
 import { startAudioMeter, stopAudioMeter } from '../recording/recording.js';
+import { partitionDrawableWindows } from './window-drawable.js';
 
 // ── Source picker state ───────────────────────────────────────────
+
+// macOS Screen Recording permission status (from the main process). When false,
+// `desktopCapturer.getSources()` returns no windows — common when launching via
+// `npm run dev`, since macOS grants Screen Recording to the responsible parent
+// process (the terminal), not Electron. The picker shows an actionable message
+// rather than a silently-empty list.
+let screenAccessGranted = true;
 
 export function updatePickerButtonText(): void {
   if (pickerMode === 'none') {
@@ -69,6 +77,32 @@ export function updatePickerButtonText(): void {
 export function renderPickerPanel(): void {
   // Single-select zone: None + Entire Screen
   screenPickerSingleZone.innerHTML = '';
+
+  // Screen Recording permission missing → explain it instead of an empty list.
+  // Inline styles (not Tailwind classes) so it renders regardless of CSS purging.
+  if (!screenAccessGranted) {
+    const warn = document.createElement('div');
+    warn.style.cssText = 'padding:8px 12px;font-size:12px;line-height:1.5;color:#fbbf24';
+    warn.innerHTML =
+      '⚠ <span style="font-weight:600">Screen Recording permission needed.</span><br>' +
+      'In dev, grant it to the app you launched from — <span style="color:#fcd34d">your terminal ' +
+      '(Cursor / VS Code / Terminal / iTerm)</span>, not the loop app. If it is not listed, click ' +
+      '<span style="color:#fcd34d">＋</span> and add that app. Then fully quit &amp; reopen it.';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Open Screen Recording settings';
+    btn.style.cssText =
+      'margin-top:6px;padding:4px 10px;font-size:12px;border-radius:6px;border:1px solid #b45309;' +
+      'background:#78350f;color:#fde68a;cursor:pointer';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.electronAPI.openScreenRecordingSettings().catch(() => {});
+    });
+    warn.appendChild(document.createElement('br'));
+    warn.appendChild(btn);
+    screenPickerSingleZone.appendChild(warn);
+  }
+
   const noneRow = createPickerRadioRow('None', pickerMode === 'none', () => {
     setPickerMode('none');
     setPickerCheckedWindows([]);
@@ -206,6 +240,19 @@ export async function populatePickerSources(): Promise<void> {
   const devices = await navigator.mediaDevices.enumerateDevices();
   setPickerAllSources(await window.electronAPI.getSources());
   setPickerAllVideoInputs(devices.filter((d) => d.kind === 'videoinput'));
+
+  // Detect missing Screen Recording permission so the picker can explain an empty
+  // source list (instead of looking broken). Absence of any screen/window source
+  // is itself a strong signal even if the status query is unavailable.
+  try {
+    const status = await window.electronAPI.getScreenAccessStatus();
+    const hasAnyCaptureSource = pickerAllSources.some(
+      (s) => s.id.startsWith('screen:') || s.id.startsWith('window:')
+    );
+    screenAccessGranted = status === 'granted' || (status === 'unknown' && hasAnyCaptureSource);
+  } catch {
+    screenAccessGranted = true;
+  }
 
   // Remove closed windows from checked list
   setPickerCheckedWindows(
@@ -348,11 +395,55 @@ export async function updateAudioStream(): Promise<void> {
   startAudioMeter(stream);
 }
 
+// Hidden, persistent DOM container that holds the per-window <video> elements.
+// Off-DOM <video autoplay> with a MediaStream does not reliably begin decoding
+// in Chromium, leaving videoWidth = 0 (black/empty draws). Mirroring the in-DOM
+// hidden #screenVideo, window videos are appended here so frames decode.
+let windowVideoSink: HTMLDivElement | null = null;
+
+function getWindowVideoSink(): HTMLDivElement {
+  if (!windowVideoSink || !windowVideoSink.isConnected) {
+    const sink = document.createElement('div');
+    sink.id = 'windowVideoSink';
+    sink.style.display = 'none';
+    document.body.appendChild(sink);
+    windowVideoSink = sink;
+  }
+  return windowVideoSink;
+}
+
+// Wait until a window <video> has decoded its first frame and reports a
+// non-zero videoWidth, so the compositor/recording draw loop draws real
+// content instead of a black/empty rectangle. Resolves early if already ready.
+function awaitWindowVideoReady(video: HTMLVideoElement): Promise<void> {
+  if (video.videoWidth > 0 && video.videoHeight > 0) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      video.removeEventListener('loadedmetadata', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      resolve();
+    };
+    const onReady = (): void => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) finish();
+    };
+    video.addEventListener('loadedmetadata', onReady);
+    video.addEventListener('loadeddata', onReady);
+    // Safety net: never block stream acquisition indefinitely if the OS never
+    // delivers a frame (the draw loop's videoWidth gate still skips it).
+    setTimeout(finish, 3000);
+  });
+}
+
 export async function updateWindowStreams(
   sourceIds: Array<{ id: string; name: string }>
 ): Promise<void> {
   cleanupWindowStreams();
   setWindowSourceNames([]);
+  const sink = getWindowVideoSink();
+  const readyWaiters: Array<Promise<void>> = [];
   for (const source of sourceIds) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Chromium desktop capture mandatory constraints
@@ -368,28 +459,71 @@ export async function updateWindowStreams(
         video: desktopConstraints
       });
       const video = document.createElement('video');
-      video.autoplay = true;
       video.muted = true;
       video.playsInline = true;
       video.srcObject = stream;
+      // In-DOM (hidden) so Chromium reliably decodes frames, mirroring #screenVideo.
+      sink.appendChild(video);
       windowStreams.push(stream);
       windowVideos.push(video);
       windowSourceNames.push(source.name);
 
-      // Handle window closed during recording
+      // Explicit play() + readiness await removes the race that leaves
+      // videoWidth = 0; autoplay alone is not reliable for off-/freshly-attached
+      // MediaStream elements.
+      try {
+        await video.play();
+      } catch (playErr) {
+        console.warn(`Window video play() failed for "${source.name}":`, playErr);
+      }
+      readyWaiters.push(awaitWindowVideoReady(video));
+
+      // Handle window closed during recording. Capture the stream reference
+      // directly (not a live-array index) so this stays correct after
+      // undrawable windows are dropped and the arrays are reassigned below.
       const track = stream.getVideoTracks()[0];
       if (track) {
-        const idx = windowStreams.length - 1;
         track.addEventListener('ended', () => {
           console.warn(`Window capture track ended: ${source.name}`);
-          if (windowStreams[idx]) {
-            windowStreams[idx]!.getTracks().forEach((t) => t.stop());
-          }
+          stream.getTracks().forEach((t) => t.stop());
         });
       }
     } catch (err) {
       console.warn(`Failed to capture window "${source.name}":`, err);
     }
+  }
+  // Don't treat sources as drawable until each has reached non-zero videoWidth.
+  await Promise.all(readyWaiters);
+
+  // awaitWindowVideoReady() resolves on a 3s safety timeout even when the OS
+  // never delivered a frame (occluded / offscreen / degenerate windows like an
+  // "App Icon Window"), leaving videoWidth/videoHeight at 0. Recording such a
+  // never-ready window produces a 0-byte / undecodable .webm that breaks proxy
+  // generation and the render/export. Drop every still-undrawable window here so
+  // only capturable windows reach startRecording(). The pre-flight in
+  // recording.ts surfaces an explicit error if this leaves no visual source.
+  const { keptIndices, droppedIndices } = partitionDrawableWindows(windowVideos);
+  if (droppedIndices.length > 0) {
+    for (const i of droppedIndices) {
+      const name = windowSourceNames[i] ?? 'unknown window';
+      console.warn(
+        `Dropping window "${name}": no frames captured (occluded, offscreen, or ` +
+          `not drawable). It will not be recorded.`
+      );
+      const stream = windowStreams[i];
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      const video = windowVideos[i];
+      if (video) {
+        video.srcObject = null;
+        video.remove();
+      }
+    }
+    // Reassign filtered, still index-aligned arrays through the state setters so
+    // the live bindings (windowStreams/windowVideos/windowSourceNames) stay in
+    // sync — never mutate the imported arrays in place here.
+    setWindowStreams(keptIndices.map((i) => windowStreams[i]!));
+    setWindowVideos(keptIndices.map((i) => windowVideos[i]!));
+    setWindowSourceNames(keptIndices.map((i) => windowSourceNames[i]!));
   }
 }
 
@@ -399,6 +533,8 @@ export function cleanupWindowStreams(): void {
   }
   for (const video of windowVideos) {
     video.srcObject = null;
+    // Detach from the hidden sink so old elements don't keep decoding.
+    video.remove();
   }
   setWindowStreams([]);
   setWindowVideos([]);

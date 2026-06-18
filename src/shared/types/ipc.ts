@@ -37,6 +37,8 @@ export interface ElectronAPI {
   projectSetLast(projectFolder: string): Promise<boolean>;
   setContentProtection(enabled: boolean): Promise<boolean>;
   getSources(): Promise<DesktopSource[]>;
+  getScreenAccessStatus(): Promise<string>;
+  openScreenRecordingSettings(): Promise<boolean>;
   computeSections(opts: ComputeSectionsOptions): Promise<ComputeSectionsResult>;
   renderComposite(opts: RenderOptions): Promise<string>;
   onRenderProgress(listener: (update: RenderProgress) => void): () => void;

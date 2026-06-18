@@ -1196,6 +1196,124 @@ describe('main/services/render-service', () => {
     expect(argsStr).not.toContain('ovl_prep');
   });
 
+  test('renderComposite drops video/window overlays whose media file is missing or 0-byte', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-bad-ovl-'));
+    const outputDir = path.join(tmpDir, 'out');
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    // Valid window capture
+    const validWindow = path.join(overlayDir, 'good-window.webm');
+    fs.writeFileSync(validWindow, 'real-window-bytes', 'utf8');
+    // 0-byte window capture (never-ready / occluded window)
+    const zeroByteWindow = path.join(overlayDir, 'empty-window.webm');
+    fs.writeFileSync(zeroByteWindow, '', 'utf8');
+    // Missing video overlay (file does not exist)
+    const missingVideo = path.join(overlayDir, 'missing-video.webm');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: outputDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 10 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        screenFitMode: 'fill',
+        overlays: [
+          { id: 'good', trackIndex: 0, mediaPath: validWindow, mediaType: 'window',
+            startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+            landscape: { x: 100, y: 100, width: 400, height: 300 },
+            reel: { x: 50, y: 50, width: 200, height: 150 } },
+          { id: 'zero', trackIndex: 1, mediaPath: zeroByteWindow, mediaType: 'window',
+            startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+            landscape: { x: 100, y: 100, width: 400, height: 300 },
+            reel: { x: 50, y: 50, width: 200, height: 150 } },
+          { id: 'missing', trackIndex: 2, mediaPath: missingVideo, mediaType: 'video',
+            startTime: 0, endTime: 5, sourceStart: 0, sourceEnd: 5,
+            landscape: { x: 100, y: 100, width: 400, height: 300 },
+            reel: { x: 50, y: 50, width: 200, height: 150 } }
+        ]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 904,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => {
+          execCalls.push(args);
+        }
+      }
+    );
+
+    // Should not throw and should produce exactly one render invocation
+    expect(execCalls).toHaveLength(1);
+    const argsStr = execCalls[0]!.join(' ');
+    // The valid window overlay is still included as an ffmpeg input
+    expect(argsStr).toContain(validWindow);
+    // The bad overlays are NOT pushed as "-i <badfile>" inputs
+    expect(argsStr).not.toContain(zeroByteWindow);
+    expect(argsStr).not.toContain(missingVideo);
+    // Output mapping remains intact
+    expect(argsStr).toContain('-map [out]');
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('renderComposite keeps all valid overlays when none are dropped', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-valid-ovl-'));
+    const screenPath = path.join(tmpDir, 'screen.webm');
+    fs.writeFileSync(screenPath, 'screen', 'utf8');
+    const overlayDir = path.join(tmpDir, 'overlay-media');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    const winA = path.join(overlayDir, 'win-a.webm');
+    const winB = path.join(overlayDir, 'win-b.webm');
+    fs.writeFileSync(winA, 'window-a', 'utf8');
+    fs.writeFileSync(winB, 'window-b', 'utf8');
+
+    const execCalls: string[][] = [];
+    await renderComposite(
+      {
+        outputFolder: tmpDir,
+        takes: [{ id: 't1', screenPath, cameraPath: null }],
+        sections: [{ takeId: 't1', sourceStart: 0, sourceEnd: 10 }],
+        keyframes: [{ time: 0, pipX: 0, pipY: 0, pipVisible: false, cameraFullscreen: false }],
+        sourceWidth: 1920,
+        sourceHeight: 1080,
+        screenFitMode: 'fill',
+        overlays: [
+          { id: 'a', trackIndex: 0, mediaPath: winA, mediaType: 'window',
+            startTime: 2, endTime: 7, sourceStart: 0, sourceEnd: 5,
+            landscape: { x: 100, y: 100, width: 400, height: 300 },
+            reel: { x: 50, y: 50, width: 200, height: 150 } },
+          { id: 'b', trackIndex: 1, mediaPath: winB, mediaType: 'window',
+            startTime: 4, endTime: 9, sourceStart: 0, sourceEnd: 5,
+            landscape: { x: 600, y: 200, width: 300, height: 200 },
+            reel: { x: 50, y: 50, width: 150, height: 100 } }
+        ]
+      },
+      {
+        ffmpegPath: '/usr/bin/ffmpeg',
+        now: () => 905,
+        probeVideoFpsWithFfmpeg: async () => 30,
+        runFfmpeg: async ({ args }: { args: string[] }) => {
+          execCalls.push(args);
+        }
+      }
+    );
+
+    expect(execCalls).toHaveLength(1);
+    const argsStr = execCalls[0]!.join(' ');
+    expect(argsStr).toContain(winA);
+    expect(argsStr).toContain(winB);
+    expect(argsStr).toContain("enable='between(t,2.000,7.000)'");
+    expect(argsStr).toContain("enable='between(t,4.000,9.000)'");
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   test('renderComposite uses original mediaPath not proxyPath for final render', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'video-render-proxy-'));
     const screenPath = path.join(tmpDir, 'screen.webm');

@@ -141,6 +141,10 @@ export function updatePreview(): void {
 export function drawComposite(): void {
   // Window capture mode: wallpaper + windows + camera PIP
   if (windowStreams.length > 0) {
+    // Wallpaper/background fills the canvas first, so a window that is not yet
+    // drawable shows the background (never a black fill). Each window is drawn
+    // on top only once its <video> reports a non-zero videoWidth/videoHeight,
+    // and begins drawing automatically on the first ready frame.
     drawBackground(ctx, CANVAS_W, CANVAS_H);
 
     if (windowStreams.length === 1 && windowVideos[0]) {

@@ -55,6 +55,8 @@ import {
   windowRecIntervals,
   setWindowRecIntervals,
   windowSourceNames,
+  pickerMode,
+  pickerCheckedWindows,
   saveFolder,
   activeProject,
   activeProjectPath,
@@ -69,6 +71,7 @@ import {
   audioMeter,
   audioSelect,
   cameraSelect,
+  noPreview,
   processingBar,
   recordBtn,
   screenPickerBtn,
@@ -204,14 +207,79 @@ export function createRecorder(stream: MediaStream, suffix: string): AppMediaRec
   return recorder;
 }
 
+// A persistent silent audio track, used so every recording carries an audio
+// stream even when no microphone is selected/granted. Without this, a screen
+// (or window/camera) recording has no audio track, and the export's FFmpeg
+// filter graph — which references the recording's audio (`[N:a]`) — fails with
+// "Stream specifier ':a' matches no streams", crashing the render.
+let silentAudioContext: AudioContext | null = null;
+let silentAudioTrack: MediaStreamTrack | null = null;
+
+function getSilentAudioTrack(): MediaStreamTrack {
+  if (silentAudioTrack && silentAudioTrack.readyState === 'live') return silentAudioTrack;
+  if (!silentAudioContext) silentAudioContext = new AudioContext();
+  if (silentAudioContext.state === 'suspended') silentAudioContext.resume().catch(() => {});
+  const dest = silentAudioContext.createMediaStreamDestination();
+  const osc = silentAudioContext.createOscillator();
+  const gain = silentAudioContext.createGain();
+  gain.gain.value = 0; // muted — produces a valid-but-silent audio track
+  osc.connect(gain).connect(dest);
+  osc.start();
+  silentAudioTrack = dest.stream.getAudioTracks()[0]!;
+  return silentAudioTrack;
+}
+
 export function addAudioToStream(stream: MediaStream): MediaStream {
-  if (!audioStream) return stream;
-  const combined = new MediaStream([...stream.getVideoTracks(), ...audioStream.getAudioTracks()]);
-  return combined;
+  const audioTracks =
+    audioStream && audioStream.getAudioTracks().length > 0
+      ? audioStream.getAudioTracks()
+      : [getSilentAudioTrack()];
+  return new MediaStream([...stream.getVideoTracks(), ...audioTracks]);
+}
+
+// Surface a recording-view error by reusing the existing `#noPreview` overlay
+// (positioned over the preview canvas). This avoids inventing a new toast/UI
+// system; the message persists until the next `updatePreview()` re-evaluates
+// stream presence. Used when a recording is blocked or silently failed so the
+// user is told instead of discovering an empty timeline later.
+export function showRecordingError(message: string): void {
+  if (!noPreview) return;
+  noPreview.textContent = message;
+  noPreview.classList.remove('hidden');
+}
+
+// True when the user's current picker selection implies a visual source
+// (Entire Screen or one/more windows) — i.e. a recording that should produce a
+// take. A camera/device-only selection is intentional and not gated.
+function selectionRequiresVisualSource(): boolean {
+  return pickerMode === 'entire-screen' || pickerCheckedWindows.length > 0;
+}
+
+// True once the selected visual source has an active stream. For windows we
+// require at least one acquired stream; entire-screen requires `screenStream`.
+function selectedVisualSourceActive(): boolean {
+  if (pickerMode === 'entire-screen') return !!screenStream;
+  if (pickerCheckedWindows.length > 0) return windowStreams.length > 0;
+  return false;
 }
 
 export async function startRecording(): Promise<void> {
   if (!activeProjectPath) return;
+
+  // Pre-flight (D3): if the user selected a visual source (Entire Screen or
+  // windows) but no corresponding stream is active after init settled, block
+  // the start and surface an explicit, actionable error rather than silently
+  // recording camera-only and producing no take. Gated on the *selected*
+  // pickerMode so intentional camera/device-only recordings are unaffected.
+  if (selectionRequiresVisualSource() && !selectedVisualSourceActive()) {
+    const sourceLabel = pickerMode === 'entire-screen' ? 'Screen' : 'Window';
+    showRecordingError(
+      `${sourceLabel} capture didn't start. Check macOS Screen Recording permission ` +
+        `(System Settings > Privacy & Security > Screen Recording), then reselect the source and try again.`
+    );
+    return;
+  }
+
   setRecorders([]);
   setSpeechSegments([]);
   setAudioChunkBuffer([]);
@@ -251,9 +319,17 @@ export async function startRecording(): Promise<void> {
       setMouseTrailCaptureHeight(wCanvas.height);
     }
     const wCtx = wCanvas.getContext('2d', { alpha: false })!;
-    wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
-    const interval = setInterval(() => {
+    // Only draw real frames once the window <video> is drawable (non-zero
+    // videoWidth/videoHeight); otherwise we'd capture a black/empty frame.
+    // updateWindowStreams() awaits readiness before recording can start, but the
+    // gate makes the draw loop self-correcting and begins drawing once ready.
+    if (wVideo.videoWidth && wVideo.videoHeight) {
       wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
+    }
+    const interval = setInterval(() => {
+      if (wVideo.videoWidth && wVideo.videoHeight) {
+        wCtx.drawImage(wVideo, 0, 0, wCanvas.width, wCanvas.height);
+      }
     }, 1000 / 30);
     windowRecIntervals.push(interval);
     const winOnly = addAudioToStream(wCanvas.captureStream(30));
@@ -742,6 +818,33 @@ export async function stopRecording(): Promise<void> {
       console.error('Failed to append recording to project timeline:', error);
       setWorkspaceView('recording');
     }
+  } else {
+    // D3 stop-path: no usable visual track was captured (!hasScreen &&
+    // !hasWindowCaptures). Previously the entire take block was skipped
+    // silently — any files other recorders wrote (e.g. the camera .webm)
+    // became take-less orphans accumulating on disk with no timeline entry and
+    // no error. Instead: surface an explicit error AND route the orphaned files
+    // to the existing `.deleted` cleanup path (OQ3 — chose cleanup over the
+    // recovery-take mechanism, which requires a screenPath a camera-only
+    // recording does not have, so reuse would silently no-op). `cleanupDeleted`
+    // on next project open purges `.deleted`, so no orphans are left behind.
+    console.error('Recording produced no usable screen/window capture; discarding orphan files.');
+    showRecordingError(
+      "Recording failed — the screen/window capture didn't start, so nothing was saved. " +
+        'Check macOS Screen Recording permission and reselect the source, then record again.'
+    );
+
+    const orphanPaths = Object.values(results)
+      .map((r) => r?.path)
+      .filter((p): p is string => !!p);
+    if (orphanPaths.length > 0 && activeProjectPath) {
+      try {
+        await window.electronAPI.stageTakeFiles(activeProjectPath, orphanPaths);
+      } catch (cleanupErr) {
+        console.warn('Failed to route orphan recording files to cleanup:', cleanupErr);
+      }
+    }
+    setWorkspaceView('recording');
   }
   updateWorkspaceHeader();
 }

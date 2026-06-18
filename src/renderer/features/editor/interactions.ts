@@ -39,6 +39,18 @@ import {
   editorCanvas
 } from '../dom/elements.js';
 
+// Recognises the benign "this take has no decodable audio track" failure that
+// `OfflineAudioContext.decodeAudioData` throws for no-mic recordings — typically a
+// DOMException named `EncodingError` with the message "Unable to decode audio data".
+// Used to keep no-audio takes quiet (D5) without swallowing real decode errors.
+function isNoAudioTrackError(err: unknown): boolean {
+  if (!err) return false;
+  const name = (err as { name?: string }).name;
+  if (name === 'EncodingError') return true;
+  const message = (err as { message?: string }).message;
+  return typeof message === 'string' && /unable to decode audio data/i.test(message);
+}
+
 function computeWaveformPeaksFromCache(numBuckets = 800): Float32Array | null {
   if (!editorState || !editorState.sections || editorState.sections.length === 0) return null;
   const totalDuration = editorState.duration;
@@ -96,7 +108,17 @@ export async function extractWaveformPeaks(numBuckets = 800): Promise<Float32Arr
         const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
         takeAudioBufferCache.set(section.takeId, audioBuffer);
       } catch (err) {
-        console.warn(`Failed to decode audio for take ${section.takeId}:`, err);
+        // D5: a take recorded with no audio track (no-mic / permission-denied) has
+        // no decodable audio in its webm, so decodeAudioData throws
+        // "EncodingError: Unable to decode audio data". That is an expected, valid
+        // state — not an error — so quiet it to a single debug log instead of a
+        // per-take warning (which also trips the renderer-health error scan).
+        // Genuine, unexpected decode failures still surface as a warning.
+        if (isNoAudioTrackError(err)) {
+          console.debug(`No audio track to decode for take ${section.takeId} (skipping waveform)`);
+        } else {
+          console.warn(`Failed to decode audio for take ${section.takeId}:`, err);
+        }
       }
     }
 

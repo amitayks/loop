@@ -2,7 +2,7 @@ import 'dotenv/config';
 import electronReload from 'electron-reload';
 electronReload(__dirname);
 
-import { app, BrowserWindow, ipcMain, dialog, desktopCapturer, shell, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, desktopCapturer, shell, screen, systemPreferences } from 'electron';
 
 import { createWindow } from './main/app/create-window.js';
 import { registerIpcHandlers } from './main/ipc/register-handlers.js';
@@ -31,6 +31,28 @@ const { cleanupMouseTrailTimer } = registerIpcHandlers({
   computeSections,
   getScribeToken,
   proxyService
+});
+
+// macOS Screen Recording permission status. When the app is launched from a CLI
+// (`npm run dev`), macOS attributes Screen Recording permission to the responsible
+// parent process (the terminal), not to Electron — so an ungranted terminal yields
+// an empty source list. The renderer queries this to show an actionable message
+// instead of a silently-blank picker. On non-macOS this resolves to 'granted'.
+ipcMain.handle('get-screen-access-status', () => {
+  try {
+    return systemPreferences.getMediaAccessStatus('screen');
+  } catch {
+    return 'unknown';
+  }
+});
+
+// Open the macOS Screen Recording settings pane so the user can grant permission
+// to the responsible app (their terminal) without hunting through System Settings.
+ipcMain.handle('open-screen-recording-settings', () => {
+  return shell
+    .openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+    .then(() => true)
+    .catch(() => false);
 });
 
 // Defensive cleanup for stale timer state from a previous hot-reload

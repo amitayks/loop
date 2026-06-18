@@ -364,12 +364,11 @@ async function renderComposite(
   const takes = Array.isArray(opts.takes) ? opts.takes : [];
   const sections = normalizeSectionInput(opts.sections);
   const keyframes: Keyframe[] = Array.isArray(opts.keyframes) ? opts.keyframes : [];
-  const rawOverlays = Array.isArray(opts.overlays)
+  let rawOverlays = Array.isArray(opts.overlays)
     ? opts.overlays.filter(o => o && o.mediaPath && o.mediaType).sort((a, b) => (a.trackIndex || 0) - (b.trackIndex || 0) || a.startTime - b.startTime)
     : [];
   const audioOverlays = normalizeAudioOverlays(opts.audioOverlays);
   const wallpaperPath = typeof opts.wallpaperPath === 'string' && opts.wallpaperPath ? opts.wallpaperPath : null;
-  const hasWindowOverlays = rawOverlays.some(o => o.mediaType === 'window');
   const pipSize = Number.isFinite(Number(opts.pipSize)) ? Number(opts.pipSize) : 422;
   const screenFitMode = opts.screenFitMode === 'fit' ? 'fit' as const : 'fill' as const;
   const exportAudioPreset = normalizeExportAudioPreset(opts.exportAudioPreset);
@@ -389,6 +388,27 @@ async function renderComposite(
   if (sections.length === 0) throw new Error('No sections to render');
 
   ensureDirectory(outputFolder);
+
+  // Drop video/window overlays whose media file is missing or 0-byte (e.g. an
+  // occluded/never-ready window capture that produced an undecodable .webm).
+  // Pushing such a file as an ffmpeg "-i" input makes the whole export crash.
+  // Filter here — BEFORE hasWindowOverlays and every downstream input index is
+  // computed — so ffmpeg input indices and filter parts stay perfectly aligned.
+  rawOverlays = rawOverlays.filter((overlay) => {
+    if (overlay.mediaType !== 'video' && overlay.mediaType !== 'window') return true;
+    const mediaPath = overlay.mediaPath;
+    const mediaAbsPath = path.isAbsolute(mediaPath) ? mediaPath : path.join(outputFolder, mediaPath);
+    try {
+      if (fs.statSync(mediaAbsPath).size > 0) return true;
+      console.warn(`[render-composite] Dropping ${overlay.mediaType} overlay ${overlay.id ?? mediaPath} — media file is empty (0 bytes): ${mediaAbsPath}`);
+      return false;
+    } catch {
+      console.warn(`[render-composite] Dropping ${overlay.mediaType} overlay ${overlay.id ?? mediaPath} — media file is missing or unreadable: ${mediaAbsPath}`);
+      return false;
+    }
+  });
+
+  const hasWindowOverlays = rawOverlays.some(o => o.mediaType === 'window');
 
   if (!ffmpegPath) throw new Error('ffmpeg-static is unavailable on this platform');
 
